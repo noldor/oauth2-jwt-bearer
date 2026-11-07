@@ -1,0 +1,6 @@
+# Keep the native detectors while scanning all explicitly selected project text.
+# The native global path prefilter otherwise skips lockfiles and generated text.
+prefilter = "false"
+
+[extend]
+useDefault = true

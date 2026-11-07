@@ -1,0 +1,97 @@
+{
+    "name": "noldors/oauth2-jwt-bearer",
+    "description": "RFC 7523 JWT Bearer Grant for League OAuth2 Server with optional Laravel Passport integration.",
+    "type": "library",
+    "license": "MIT",
+    "homepage": "https://github.com/noldor/oauth2-jwt-bearer",
+    "keywords": [
+        "oauth2",
+        "jwt",
+        "passport",
+        "rfc7523"
+    ],
+    "support": {
+        "issues": "https://github.com/noldor/oauth2-jwt-bearer/issues",
+        "source": "https://github.com/noldor/oauth2-jwt-bearer"
+    },
+    "require": {
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-sodium": "*",
+        "lcobucci/jwt": "^5.6",
+        "league/oauth2-server": "^9.4.1",
+        "php": "^8.5",
+        "psr/clock": "^1.0",
+        "psr/http-message": "^2.0"
+    },
+    "require-dev": {
+        "brianium/paratest": "^7.0",
+        "denzyl/phanalist": "^1.1",
+        "infection/infection": "^0.34",
+        "larastan/larastan": "^3.13",
+        "laravel/passport": "13.10.0",
+        "nyholm/psr7": "^1.8",
+        "noldors/phpcsfixer-rules": "^1.2",
+        "noldors/phpstan-extension": "^0.8",
+        "orchestra/testbench": "^11.3",
+        "phpstan/phpstan": "^2.3",
+        "phpunit/phpunit": "^13.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "Noldors\\OAuth2JwtBearer\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Noldors\\OAuth2JwtBearer\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Noldors\\OAuth2JwtBearer\\Passport\\JwtBearerServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "format": "php-cs-fixer fix --using-cache=no",
+        "test:lint": "php-cs-fixer fix --dry-run --diff --using-cache=no",
+        "test:types": "phpstan analyse --autoload-file=vendor/larastan/larastan/bootstrap.php --memory-limit=512M",
+        "test:phanalist": "/usr/local/bin/phanalist --src .",
+        "test": "phpunit --no-coverage",
+        "check": [
+            "@test:lint",
+            "@test:types",
+            "@test:phanalist",
+            "@test"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "preferred-install": "dist",
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "infection/extension-installer": false
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "archive": {
+        "exclude": [
+            "/*",
+            "/.*",
+            "!/composer.json",
+            "!/LICENSE",
+            "!/README.md",
+            "!/src",
+            "!/src/**",
+            "!/docs",
+            "!/docs/**"
+        ]
+    },
+    "suggest": {
+        "laravel/passport": "^13.10 for the optional Passport service provider."
+    }
+}

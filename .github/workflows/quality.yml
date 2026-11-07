@@ -1,0 +1,62 @@
+name: Quality
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oauth2-jwt-bearer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      COMPOSE_PROJECT_NAME: oauth2-jwt-bearer-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Configure the package runtime user
+        run: |
+          echo "PACKAGE_UID=$(id -u)" >> "$GITHUB_ENV"
+          echo "PACKAGE_GID=$(id -g)" >> "$GITHUB_ENV"
+      - name: Build the package runtime
+        run: docker compose build app
+      - name: Validate manifest and committed lock
+        run: docker compose run --rm app composer --no-plugins --no-scripts validate --strict
+      - name: Install the committed resolution
+        run: docker compose run --rm app composer --no-plugins --no-scripts install --no-interaction --prefer-dist --no-progress
+      - name: Audit runtime and development dependencies
+        run: docker compose run --rm app composer --no-plugins --no-scripts audit --locked --format=json
+      - name: Check code and League/Passport/PostgreSQL integration
+        run: docker compose run --rm app composer check
+      - name: Set up pinned local secret scanner
+        run: |
+          curl -fsSL https://github.com/betterleaks/betterleaks/releases/download/v1.10.0/betterleaks_1.10.0_linux_x64.tar.gz -o /tmp/betterleaks.tar.gz
+          echo "9d9ad503cd5d80d18a939352266c3fcca52f10da9b83cd5cfe646989b13940fe  /tmp/betterleaks.tar.gz" | sha256sum -c -
+          mkdir /tmp/jwt-bearer-scanner
+          tar -xzf /tmp/betterleaks.tar.gz -C /tmp/jwt-bearer-scanner betterleaks
+      - name: Verify native secret-scanner controls
+        env:
+          BETTERLEAKS_BINARY: /tmp/jwt-bearer-scanner/betterleaks
+        run: python3 -m unittest discover -s .github/tests
+      - name: Scan current/index files and complete candidate history
+        run: python3 .github/scripts/check_secrets.py --binary /tmp/jwt-bearer-scanner/betterleaks --history-ref HEAD
+      - name: Verify distribution boundaries
+        run: |
+          docker compose run --rm app composer archive --format=zip --dir=build/distribution --file=composer-package --no-interaction
+          git archive --format=zip --output=build/distribution/git-package.zip HEAD
+          python3 .github/scripts/verify_archive.py build/distribution/composer-package.zip build/distribution/git-package.zip
+      - name: Stop the isolated runtime
+        if: always()
+        run: docker compose down --volumes --remove-orphans
