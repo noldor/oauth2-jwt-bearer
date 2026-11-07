@@ -39,15 +39,9 @@ final class Postgres
 
     public static function createSchema(PDO $connection): void
     {
-        $connection->exec(
-            'DROP TABLE IF EXISTS assertion_uses, league_tokens',
-        );
+        $connection->exec('DROP TABLE IF EXISTS league_tokens');
         $connection->exec(
             'CREATE TABLE league_tokens (id VARCHAR(80) PRIMARY KEY, user_id TEXT, client_id TEXT NOT NULL, scopes JSONB NOT NULL, revoked BOOLEAN NOT NULL DEFAULT FALSE)',
         );
-        $connection->exec(
-            'CREATE TABLE assertion_uses (issuer TEXT NOT NULL, jti TEXT NOT NULL, token_id VARCHAR(80) NOT NULL REFERENCES league_tokens(id) ON DELETE RESTRICT ON UPDATE RESTRICT, expires_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (issuer, jti))',
-        );
-        $connection->exec('TRUNCATE league_tokens, assertion_uses');
     }
 }

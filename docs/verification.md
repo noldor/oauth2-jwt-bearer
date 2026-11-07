@@ -21,21 +21,20 @@ The Docker/src/tests/docs layout follows the adjacent packages. The test runtime
 
 Composer ranges describe downstream compatibility, not proof of every allowed combination. The committed lock SHA-256 is `c3acdef3cb9e815fa8c1f53348fbc78452be27a3081ee4f5dcd4c3ea3f086bd1`.
 
-## Current boundary
+## Current boundary and coverage
 
-The native grant has only verifier and subject-resolver dependencies. It verifies JWT/client/scopes and delegates normal access-token issuance/signing/persistence to League/Passport. It performs fresh time checks after subject/scope work and after native token persistence. There is no assertion-use repository, storage callback or automatic replay tracking in the package.
+`JwtBearerGrant($verifier)` fully verifies JWT and uses an already local subject. `forVerifiedAssertion($verifier, $verified, $localId)` accepts a trusted verified snapshot from application code, binds original bytes and avoids a second signature/key lookup. Only `KeyResolver` remains as an application contract. Native client/scopes/time/persistence/signing behavior is retained.
 
-Test application operations own one transaction around the complete native response, their later atomic replay insert and a public verifier time check after possible insert contention. Those examples prove a consuming application's composition; they do not turn replay into a grant capability. Direct native-grant tests separately prove that no replay record is written and the same assertion can be exchanged again while valid. Default `jti` requirements remain claim policy; a profile can deliberately omit that requirement.
+- Trusted issuer/key rotation, exact algorithm/key binding, raw claim types, signature/audience/issuer, bounded lifetime, leeway/nbf, extra constraints and injected clock.
+- ES256/384/512, RS256/384/512, RFC 9864 Ed25519 default and distinct opt-in EdDSA, tampering, wrong allowlists/curves.
+- Real League and Passport issuance, external-to-local mapping, credentials/grant restrictions, scopes/defaults/explicit empty scope, native guard/revocation and no required Passport routes.
+- Prepared request binding, no second key resolution, ignored HTTP user IDs, isolated per-call identities and an unchanged shared server.
+- Repeated valid assertion exchange and CRM without assertion `jti`, preserving native access-token `jti`.
+- Structured reasons, safe generic native OAuth payload and application error boundaries.
+- Expiry after application work, native persistence and the complete native response, with SQL rollback and signing-failure retry.
+- An observed PostgreSQL lock wait between independent processes followed by fresh expiry rejection, trusted local identity retained and no persisted token.
 
-## Behavioral coverage
-
-- Trusted issuer/key rotation, exact algorithm/key binding, raw claim types, signature/audience/issuer validation, bounded lifetime, leeway/nbf, extra constraints and PSR-clock boundaries.
-- ES256/384/512, RS256/384/512, exact RFC 9864 Ed25519 default and separate opt-in legacy EdDSA, including tampering and wrong allowlists/curves.
-- Real League and Passport native issuance, mapped users, client credentials/grants, scope defaults/explicit empty scope, Passport bearer guard/revocation and programmatic operation without Passport routes.
-- Structured rejection reasons, the exact preserved previous exception, generic safe OAuth payload, no input-bearing vendor cause, and unchanged application-exception passthrough.
-- Fresh grant time checks after user resolution and native persistence; application-owned post-response expiry/replay rejection and rollback before retry.
-- Actual observed PostgreSQL waits between separate processes: one successful application replay-protected exchange, expiry while waiting for a user row lock, and direct structured rejection from the application's public time check after replay-insert contention. Trusted invocation-local identity remains available after rollback.
-- Application-example FK controls reject orphan links and restricted token deletion/update. The package supplies no schema or migrations.
+There is no subject resolver, replacement user callback, assertion-use schema or one-time policy in source, examples or tests. Application operations own user/rate/ACTIVE rules, locks, one transaction around the complete response and a final public time check.
 
 ## Commands and evidence
 
@@ -45,15 +44,16 @@ docker compose -p oauth2-jwt-bearer run --rm app composer check
 docker compose -p oauth2-jwt-bearer run --rm app composer --no-plugins --no-scripts audit --locked --format=json
 ```
 
-The replay-removal red phase demonstrated both old boundary violations: the native grant wrote an assertion-use row, and a profile without required `jti` was still rejected by storage coupling. Both cases pass after the removal. The final full gate, including the post-review UTC-serialization correction, passed **145 tests / 676 assertions** with random seed `1794072359`, the shared formatter, PHPStan max and pinned phanalist.
+The test-first prepared-grant cases failed before the factory existed. A later review found that native parameter trimming weakened literal byte binding; the new leading/trailing-whitespace regression failed before the correction and now passes. The prepared path compares the original parsed-body string; raw native extraction remains unchanged.
 
-Earlier same-day locked advisory checks were clean. Dependencies, lock, scanner/tool configuration are unchanged, so those results and five native Betterleaks controls remain applicable. The controls cover allowed/prohibited/changed synthetic tokens, errors, lockfile scanning, broken symlinks, intermediate additions later removed, file-type transitions and merge-only additions. Current/index bytes and committed history are scanned before handoff. Composer and Git distribution archives are verified against the exact public allowlist; tests/fixtures/tooling and the development lock stay out of distribution.
+The final `composer check` passed **137 tests / 559 assertions**, random seed `1794075650`, along with formatter, PHPStan max and pinned phanalist. Composer strict validation passed. A real Composer path consumer without Laravel or Passport passed raw and prepared native issuance, local-ID mapping, no second key lookup and structured error extraction.
 
-Remote CI/hosting protection has not run. The consumer's actual dependency graph, application SQL/replay policy, identity/audit context and error mapping remain separate acceptance boundaries. See [local installation](local-installation.md), [application transaction example](transactions.md) and [structured rejections](rejections.md).
+Dependency lock and scanner/tool configuration are unchanged. Earlier same-day locked advisory checks and five native Betterleaks controls remain applicable. Current/index bytes and committed history are scanned before handoff; Composer/Git distribution archives are checked against the exact public allowlist. Tests, fixtures, development tooling and lock are excluded from distribution.
 
+Remote CI has not run. The consumer's dependency graph, GraphQL, domain SQL/locking/rate rules, refusal audit and error mapping need their own acceptance checks. See [local installation](local-installation.md), [transaction example](transactions.md) and [structured rejections](rejections.md).
 
-## Independent review and handoff
+## Independent review and local handoff
 
-Requirements, Code quality and Security reviews found no issues in this removal. Standards compliance identified one inherited serializer issue in the moved application examples: SQL-style timestamp strings lacked explicit UTC normalization. The two fixture writers and SQL example now use UTC ISO 8601 with six fractional digits; that P3 is fixed and source-reverified. There are no open review findings, and no new shared standards or automated-check proposals.
+Separate Requirements, Code quality, Security Guidance and Standards compliance reviews have no open findings. The Code quality review's exact-byte trimming defect was reproduced, fixed and rechecked by the affected reviewers. No new shared-rule or automated-check proposal is needed for this correction.
 
-A real Composer path consumer without Laravel/Passport passed repeated direct native issuance without consuming an assertion, plus structured error extraction. Current documentation links and absence of the removed API were checked. The package remains unpublished; the consumer must remove the old third constructor argument/bindings and own its SQL/time check directly in the complete issuance operation.
+Current/index Betterleaks scanning is clean. Composer and staged Git archives match the exact public-file allowlist. Final prose changes receive the same byte scan/archive checks; committed history is scanned before handoff. The package remains unpublished. Consumers must remove the former resolver constructor argument/binding, use direct application user rules and choose raw or prepared issuance according to subject identity.

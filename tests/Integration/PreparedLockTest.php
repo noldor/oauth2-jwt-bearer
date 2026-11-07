@@ -12,7 +12,7 @@ use Noldors\OAuth2JwtBearer\Tests\Fixtures\Postgres;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\JwtFactory;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\LeagueEnvironment;
 
-final class ConcurrentExchangeTest extends TestCase
+final class PreparedLockTest extends TestCase
 {
     private PDO $connection;
 
@@ -36,8 +36,6 @@ final class ConcurrentExchangeTest extends TestCase
 
     protected function tearDown(): void
     {
-        \touch($this->directory . '/gate.release');
-
         foreach ($this->workers as $worker) {
             \proc_terminate($worker['process']);
             \fclose($worker['stdout']);
@@ -56,28 +54,6 @@ final class ConcurrentExchangeTest extends TestCase
         \rmdir($this->directory);
     }
 
-    public function testConcurrentReplayCommitsExactlyOneToken(): void
-    {
-        $first = $this->startWorker('jwt-race-first', ['gate' => $this->directory . '/gate']);
-        $this->waitUntil(
-            fn (): bool => \is_file($this->directory . '/gate.ready'),
-        );
-        $second = $this->startWorker('jwt-race-second');
-        $this->waitForDatabaseLock('jwt-race-second');
-        \touch($this->directory . '/gate.release');
-        $this->assertSame('success', $this->finishWorker($first));
-        $this->assertSame('application_rejection', $this->finishWorker($second));
-        $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
-        $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
-        $this->assertSame(
-            1,
-            (int) Postgres::value(
-                $this->connection,
-                'SELECT COUNT(*) FROM assertion_uses u JOIN league_tokens t ON t.id = u.token_id',
-            ),
-        );
-    }
-
     public function testExpiresWhileActuallyWaitingForUserRowLock(): void
     {
         $this->connection->exec(
@@ -90,7 +66,7 @@ final class ConcurrentExchangeTest extends TestCase
         $this->connection->exec(
             "UPDATE locked_users SET current_time_value = '2026-11-07T12:01:03Z' WHERE id = 1",
         );
-        $worker = $this->startWorker('jwt-user-lock', ['lockUser' => true, 'structuredError' => true]);
+        $worker = $this->startWorker('jwt-user-lock');
         $this->waitForDatabaseLock('jwt-user-lock');
         $this->connection->commit();
         $this->assertSame([
@@ -99,34 +75,9 @@ final class ConcurrentExchangeTest extends TestCase
             'identity' => ['userId' => 'internal-7', 'clientId' => 'oauth-client'],
         ], \json_decode($this->finishWorker($worker), true, flags: \JSON_THROW_ON_ERROR));
         $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
-        $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
     }
 
-    public function testExpiryAfterUsageContentionKeepsReasonAndIdentity(): void
-    {
-        $this->connection->beginTransaction();
-        $this->connection->exec(
-            "INSERT INTO league_tokens (id, user_id, client_id, scopes) VALUES ('blocking-token', 'internal-7', 'oauth-client', '[]')",
-        );
-        $this->connection->exec(
-            "INSERT INTO assertion_uses VALUES ('crm', 'once', 'blocking-token', '2026-11-07T12:01:03Z')",
-        );
-        $worker = $this->startWorker('jwt-usage-expiry', ['expireAfterUsage' => true, 'structuredError' => true]);
-        $this->waitForDatabaseLock('jwt-usage-expiry');
-        $this->connection->rollBack();
-        $this->assertSame([
-            'error' => 'application_rejection',
-            'reason' => 'expired',
-            'identity' => ['userId' => 'internal-7', 'clientId' => 'oauth-client'],
-        ], \json_decode($this->finishWorker($worker), true, flags: \JSON_THROW_ON_ERROR));
-        $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
-        $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
-    }
-
-    /**
-     * @param array<string, mixed> $options
-     */
-    private function startWorker(string $name, array $options = []): int
+    private function startWorker(string $name): int
     {
         $environment = new LeagueEnvironment($this->connection);
         $body = $environment->request()->getParsedBody();
@@ -136,7 +87,6 @@ final class ConcurrentExchangeTest extends TestCase
             'publicKeyBase64' => \base64_encode(JwtFactory::keys('ed25519:crm')['public']),
             'signingKey' => JwtFactory::keys('oauth')['private'],
             'name' => $name,
-            ...$options,
         ];
         $path = $this->directory . '/' . $name . '.json';
         \file_put_contents($path, \json_encode($input, \JSON_THROW_ON_ERROR));

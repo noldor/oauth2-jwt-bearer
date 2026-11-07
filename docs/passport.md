@@ -1,48 +1,40 @@
 # Laravel Passport integration
 
-The optional provider uses Laravel's `afterResolving(AuthorizationServer::class)` callback and League's `enableGrantType()`. It uses Passport's existing client/token/scope repositories and configured `Passport::tokensExpireIn()`. It does not copy a Passport provider, subclass its internals, patch vendor, publish migrations or register routes.
+The package uses native Passport clients, AuthorizationServer, token repository, scopes, bearer guard and revocation. No internals are copied or patched. The optional auto-discovered provider enables a raw grant **only if the application explicitly binds `JwtBearerGrant`**, with normal `Passport::tokensExpireIn()` TTL. Both server-resolution orders are supported.
 
-## Application registration
+## External CRM subject: bind only the verifier
 
-Laravel auto-discovers `Noldors\OAuth2JwtBearer\Passport\JwtBearerServiceProvider`. If discovery is disabled, register it in `bootstrap/providers.php`. It activates the grant only if the application explicitly binds `JwtBearerGrant::class`; auto-wiring an otherwise unconfigured grant is not attempted.
-
-In your application provider's `register()` method, bind a fresh configured grant:
+CRM `sub` is an external ID. Do not bind a raw `JwtBearerGrant` or register it on the shared server. Bind the configured verifier, trusted `KeyResolver` and PSR Clock in the application's normal provider:
 
 ```php
-use Noldors\OAuth2JwtBearer\{AssertionVerifier, JwtBearerGrant};
-use Noldors\OAuth2JwtBearer\Contracts\{KeyResolver, SubjectResolver};
-use Psr\Clock\ClockInterface;
+use Noldors\OAuth2JwtBearer\{
+    AssertionRequirements, AssertionVerifier, ClientAuthentication, TrustedIssuer,
+};
 
-$this->app->singleton(AssertionVerifier::class, function ($app): AssertionVerifier {
-    return new AssertionVerifier(
-        $app->make(KeyResolver::class),
-        $app->make(ClockInterface::class),
-        $app->make(TrustedCrmIssuer::class)->profiles(),
-    );
-});
-$this->app->bind(JwtBearerGrant::class, function ($app): JwtBearerGrant {
-    return new JwtBearerGrant(
-        $app->make(AssertionVerifier::class),
-        $app->make(SubjectResolver::class),
-    );
-});
+$this->app->singleton(AssertionVerifier::class, fn ($app) => new AssertionVerifier(
+    $app->make(\Noldors\OAuth2JwtBearer\Contracts\KeyResolver::class),
+    $app->make(\Psr\Clock\ClockInterface::class),
+    [new TrustedIssuer(
+        issuer: config('crm.issuer'),
+        clientId: config('crm.oauth_client_id'),
+        audience: config('crm.audience'),
+        requirements: new AssertionRequirements(60, 3, ['iat']),
+        clientAuthentication: ClientAuthentication::OPTIONAL,
+    )],
+));
 ```
 
-`TrustedCrmIssuer` here is your application's configuration owner, returning the `TrustedIssuer` profile shown in the README; it is not a package class. Bind both application contracts and the PSR clock before resolving AuthorizationServer. Inject the same configured `AssertionVerifier` into the application issuance operation for its post-insert time check. Supply per-invocation subject/audit context through application composition rather than retaining request state in a shared grant or resolver.
+Default algorithm is `Ed25519`. CRM requires `iat` and `exp`, no assertion `jti` or one-time storage. Native access-token `jti` remains unchanged. Set native TTL during setup with `Passport::tokensExpireIn(new DateInterval('PT1H'))`.
 
-Create/use a normal Passport client and explicitly include `JwtBearerGrant::IDENTIFIER` in that client's `grant_types`, alongside any grants it already needs. Configure the profile's `clientId` to the actual stored client ID; do not derive it from `iss`. Revoked clients and clients lacking this grant are rejected through Passport/League. Standard Passport client-secret hashing and validation apply when credentials are supplied.
+## Programmatic issuance
 
-If you want the standard Passport token lifetime to be an hour, set `Passport::tokensExpireIn(new DateInterval('PT1H'))` in your application provider before the AuthorizationServer is first resolved. Changing this default also affects other Passport grants, following normal Passport behavior. For a grant-specific lifetime, opt out of this package's auto-discovery and register your configured grant yourself in an `afterResolving` callback with an explicit League TTL. No custom access-token entity or bearer guard is required.
-
-## Assertion-only application operation
-
-The application issuance operation owns OAuth client parameters, empty scope, the transaction and replay SQL. No replay service or repository contract is supplied by the package. The application's subject resolver can find an existing active user by external ID using `lockForUpdate()`, retain the `VerifiedAssertion` in the invocation context, then return the internal user ID. The grant rechecks the assertion time after this resolver returns, including after waiting on the lock.
+GraphQL accepts only assertion; its application operation constructs OAuth parameters. Here `$verifier` and the ordinary `$authorizationServer` are injected; `User` is the existing application model:
 
 ```php
 use Illuminate\Support\Facades\DB;
-use League\OAuth2\Server\AuthorizationServer;
-use Noldors\OAuth2JwtBearer\JwtBearerGrant;
+use Laravel\Passport\Passport;
 use Nyholm\Psr7\{Response, ServerRequest};
+use Noldors\OAuth2JwtBearer\JwtBearerGrant;
 
 $request = (new ServerRequest('POST', 'https://mail.example/internal/exchange'))
     ->withParsedBody([
@@ -50,29 +42,38 @@ $request = (new ServerRequest('POST', 'https://mail.example/internal/exchange'))
         'assertion' => $assertion,
         'scope' => '',
     ]);
-
-$response = DB::transaction(function () use ($authorizationServer, $request, $verifier, $context) {
-    $response = $authorizationServer->respondToAccessTokenRequest($request, new Response());
-    // Continue in the application use case: extract the issued token ID from
-    // its trusted native response, atomically insert jti -> token ID, handle
-    // duplicate-key replay, then recheck after possible SQL contention.
-    $verifier->assertValidAt($context->assertion);
+$response = DB::transaction(function () use ($assertion, $request, $verifier, $authorizationServer) {
+    $verified = $verifier->verify($assertion);
+    $user = User::query()->where('external_id', $verified->subject)->lockForUpdate()->first();
+    if ($user === null || !$user->active) {
+        throw new DomainException('No eligible local user.');
+    }
+    // Apply remaining application rate/eligibility rules here.
+    $server = clone $authorizationServer;
+    $server->enableGrantType(
+        JwtBearerGrant::forVerifiedAssertion($verifier, $verified, (string) $user->getAuthIdentifier()),
+        Passport::tokensExpireIn(),
+    );
+    $response = $server->respondToAccessTokenRequest($request, new Response());
+    $verifier->assertValidAt($verified);
     return $response;
 });
 ```
 
-The example marks the application-owned insert step; the [complete transaction example](transactions.md) shows the atomic SQL and token-ID extraction. Keep that work directly in the complete issuance use case, such as `Token::issue`.
+Use the actual verified snapshot from the same verifier and exact original JWT bytes. No second signature/key lookup or JWT rewriting occurs. Time is rechecked after waiting; native credentials, client grant restrictions and scope policy remain active. Supplied credentials are validated even with `OPTIONAL`. Local user ID is a trusted PHP argument; HTTP body/attributes cannot override it.
 
-Inject the normal `AuthorizationServer` and the appropriate database connection into the complete application use case. This example uses the facade only to make the transaction boundary visible. The application’s replay insert and Passport token model must share that connection; account for `passport.connection` and any custom Passport models. Do not wrap Passport's HTTP controller instead: an error converted to a response inside your transaction could commit a losing token. The direct AuthorizationServer call throws until handled outside the transaction.
+Choose the token/user connection explicitly for multi-connection applications. Wrap the complete response and final time check, handle errors outside the transaction and keep identity variables local. Scope `''` stays empty even with global defaults. No refresh token or application success audit is added. Refusal audit uses the application's trusted local variables and [structured reasons](rejections.md).
 
-To keep Passport's HTTP routes closed, call `Passport::ignoreRoutes()` from an application provider's `register()` method, before Passport boots. The PSR request above needs no matching HTTP route. GraphQL can expose only `assertion` and translate the returned standard OAuth body into its application result.
+No Passport HTTP route is required. Preserve application route configuration; `Passport::ignoreRoutes()` can disable routes where appropriate. Native bearer guard and standard token revocation work normally.
 
-## First-consumer profile and lifecycle
+## Already local subject: optional raw binding
 
-The current serton-mail profile is **Ed25519 / `alg: Ed25519`**, mandatory `iat`, `exp`, `jti`, lifetime at most 60 seconds, leeway 3 seconds and optional `nbf`. Audience, issuer and key IDs are configured in advance. The package defaults match the algorithm/lifetime/required claims; configure the 3-second leeway and mapped client explicitly. `ClientAuthentication::OPTIONAL` permits the trusted server adapter to omit client credentials. Any credentials supplied are still authenticated.
+Only when verified `sub` already is the local OAuth user ID:
 
-The exchanged token is a standard Passport token. `auth:api` / the Passport bearer guard loads the mapped local user; Passport's normal token repository revokes the token. Scope lookup/finalization goes through Passport. Set `scope` to `''` for the first consumer even if other application flows configure default scopes. The grant produces no refresh token.
+```php
+$this->app->singleton(JwtBearerGrant::class, fn ($app) => new JwtBearerGrant(
+    $app->make(\Noldors\OAuth2JwtBearer\AssertionVerifier::class),
+));
+```
 
-Business activity checks, rate limits, row locks and refusal audit belong to the application. No success audit is added. The Passport integration tests (`tests/Integration/PassportGrantTest.php` in the source checkout) exercise the real Laravel/Passport container and migrations, programmatic issuance with no Passport routes, client restrictions/credentials, scope persistence, bearer authentication, standard revocation and transaction rollback.
-
-For the existing refusal-audit taxonomy, use [structured rejection reasons](rejections.md) from the native OAuth exception's previous chain. Retain the trusted User/client in application-owned per-exchange context; post-wait expiry does not clear it. Consumer exceptions for rate policy, missing/deleted users and replay propagate without conversion.
+The provider enables this raw grant on the native server; raw requests always verify JWT fully. This binding is unsuitable for the CRM external-ID flow.

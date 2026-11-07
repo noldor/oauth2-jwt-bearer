@@ -25,7 +25,7 @@ final class RejectionCases
 
         yield 'invalid audience' => [['claims' => ['aud' => 'elsewhere']], 'claims_invalid'];
 
-        yield 'missing jti' => [['claims' => ['jti' => null]], 'claims_invalid'];
+        yield 'missing iat' => [['claims' => ['iat' => null]], 'claims_invalid'];
 
         yield 'invalid temporal type' => [['claims' => ['exp' => 'never']], 'claims_invalid'];
 

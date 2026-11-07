@@ -2,7 +2,7 @@
 
 Reusable [RFC 7523 §2.1](https://www.rfc-editor.org/rfc/rfc7523.html#section-2.1) authorization grant for League OAuth2 Server. PHP 8.5; Laravel-independent core; optional Passport integration. JWT client authentication (`client_assertion`) is deliberately outside this grant.
 
-The package verifies an assertion and delegates access-token creation, persistence, signing, response formatting, scopes and revocation to League and the installed repositories. The application owns eligible users, issuer-to-client configuration, user locks, the transaction and assertion-use storage. No application SQL schema, user model, audit implementation or HTTP endpoint is installed.
+The package verifies an assertion and delegates access-token creation, persistence, signing, response formatting, scopes and revocation to League and the installed repositories. The application owns eligible users, issuer-to-client configuration, user locks, the transaction and local subject mapping. No application SQL schema, user model, audit implementation or HTTP endpoint is installed.
 
 ## Installation
 
@@ -34,27 +34,41 @@ $issuer = new TrustedIssuer(
     requirements: new AssertionRequirements(
         maxLifetimeSeconds: 60,
         leewaySeconds: 3,
-        requiredClaims: ['iat', 'jti'],
+        requiredClaims: ['iat'],
     ),
     clientAuthentication: ClientAuthentication::OPTIONAL,
 );
 
-// $keys and $subjects implement the two application contracts below.
+// $keys implements KeyResolver.
 // $clock implements Psr\Clock\ClockInterface.
 $verifier = new AssertionVerifier($keys, $clock, [$issuer]);
-$grant = new JwtBearerGrant($verifier, $subjects);
+// Raw path: verified sub must already be the local OAuth user ID.
+$grant = new JwtBearerGrant($verifier);
 
 $authorizationServer->enableGrantType($grant, new DateInterval('PT1H'));
 ```
 
 The default assertion algorithm is **`Ed25519`**, with exactly `alg: "Ed25519"` as registered by [RFC 9864](https://www.rfc-editor.org/rfc/rfc9864.html#section-2.2). It does not change the signing algorithm of the access token issued by League/Passport.
 
-The application implements:
+The application implements only `KeyResolver::resolve(issuer, kid): ?VerificationKey`: return a trusted public key bound to one algorithm, or `null` for an untrusted/missing key. Keep multiple trusted key IDs during rotation; never trust keys or URLs supplied in JWT headers.
 
-- `KeyResolver::resolve(issuer, kid): ?VerificationKey`: obtain a trusted public key bound to one `Algorithm`. Missing/untrusted keys return `null`. Keep multiple trusted `kid` values during rotation. Never trust JWT-provided `jwk`, `jku`, `x5u` or certificates as key sources.
-- `SubjectResolver::resolve(VerifiedAssertion): string`: map the verified external subject to an existing eligible local user ID, acquiring application row locks if needed. Reject with `AssertionRejected`. An empty result is rejected.
+For an external subject, verify first and run application user/eligibility/locking rules directly. Then prepare a fresh grant on a per-call clone of the native server:
 
-The package does not store or consume assertions and has no replay/storage callback. The application owns replay policy and persistence in its complete issuance operation. It can retain `VerifiedAssertion` from `SubjectResolver`, perform its atomic `jti` → issued-token insert after the native AuthorizationServer response, and call the public `AssertionVerifier::assertValidAt()` again after possible insert contention, before committing. `jti` remains required by the default claim profile and can be configured through `requiredClaims`. Application operational failures propagate instead of becoming JWT validation failures.
+```php
+$verified = $verifier->verify($assertion);
+// Application finds/locks an eligible existing user using $verified->subject.
+$server = clone $authorizationServer;
+$server->enableGrantType(
+    JwtBearerGrant::forVerifiedAssertion($verifier, $verified, (string) $user->id),
+    new DateInterval('PT1H'),
+);
+$response = $server->respondToAccessTokenRequest($request, $responsePrototype);
+$verifier->assertValidAt($verified); // Fresh time after the full response, before commit.
+```
+
+This trusted in-process API requires the actual `VerifiedAssertion` returned by the same configured verifier and a trusted local user ID. It binds the request to the exact original JWT bytes and retains the verified issuer/subject/profile snapshot. It **does not verify the signature or resolve keys a second time**. Fresh time and native client/scopes checks still run. HTTP body/attribute `user_id` never selects identity. Do not retain a prepared grant on a shared server or singleton. The raw constructor always performs full verification and uses verified `sub` as the local identifier.
+
+There is no subject resolver, user callback, assertion-use repository or storage hook. Assertions can be exchanged repeatedly while valid. CRM uses `requiredClaims: ['iat']`, without required assertion `jti`. Generic defaults additionally require `jti` as a claim without recording its use. Native access-token `jti` is unchanged. Wrap verification, application locks/rules, complete response generation and the final public time check in one application transaction.
 
 See [League setup](docs/league.md), [Passport setup](docs/passport.md), and the [transaction contract](docs/transactions.md).
 
@@ -94,7 +108,7 @@ If `iat` is intentionally optional, the maximum lifetime limits `exp` relative t
 
 `ClientAuthentication::REQUIRED` is the default and requires valid client credentials for the mapped client. `OPTIONAL` permits credentials to be omitted because a trusted issuer already maps to a specific OAuth client. If any client identification/credentials are supplied, both modes require authentication: form `client_id`/`client_secret` or HTTP Basic. A client ID alone is not an unauthenticated selector. Supplied credentials never override the issuer's configured client. Mixed authentication methods, malformed Authorization headers and unsupported `client_assertion` are rejected. Repositories remain responsible for client activity and allowed grants.
 
-Malformed/missing request parameters use League `invalid_request`; rejected assertions/shared user rejections use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens. Assertion failures retain `AssertionRejected` with a readonly `AssertionRejectionReason` through the OAuth exception’s `getPrevious()` chain. See [structured rejection and application audit](docs/rejections.md) for reason mapping, preserved per-exchange User/client context and application-exception passthrough.
+Malformed/missing request parameters use League `invalid_request`; rejected assertions use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens. Assertion failures retain `AssertionRejected` with a readonly `AssertionRejectionReason` through the OAuth exception’s `getPrevious()` chain. See [structured rejection and application audit](docs/rejections.md) for reason mapping, trusted local User/client variables and application-exception passthrough.
 
 ## Development
 

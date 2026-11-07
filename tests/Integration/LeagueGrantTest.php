@@ -5,7 +5,6 @@ declare(strict_types = 1);
 namespace Noldors\OAuth2JwtBearer\Tests\Integration;
 
 use PDO;
-use DomainException;
 use RuntimeException;
 use Nyholm\Psr7\Response;
 use Nyholm\Psr7\ServerRequest;
@@ -31,7 +30,7 @@ final class LeagueGrantTest extends TestCase
         $this->environment = new LeagueEnvironment($this->connection);
     }
 
-    public function testIssuesStandardLeagueTokenWithMappedUserAndScopes(): void
+    public function testIssuesStandardLeagueTokenWithVerifiedSubjectAndScopes(): void
     {
         $response = $this->environment->exchange(
             $this->environment->request(['scope' => 'read write']),
@@ -43,26 +42,26 @@ final class LeagueGrantTest extends TestCase
         $this->assertEqualsWithDelta(3_600, $body['expires_in'], 1);
         $this->assertArrayNotHasKey('refresh_token', $body);
         $token = OAuthResponse::token($body['access_token']);
-        $this->assertSame('internal-7', $token->claims()->get('sub'));
+        $this->assertSame('external-42', $token->claims()->get('sub'));
         $this->assertSame(['oauth-client'], $token->claims()->get('aud'));
         $this->assertSame(['read', 'write'], $token->claims()->get('scopes'));
-        $this->assertSame(
-            $token->claims()->get('jti'),
-            Postgres::value($this->connection, 'SELECT token_id FROM assertion_uses'),
-        );
         $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
     }
 
-    public function testNativeGrantDoesNotWriteOrConsumeAssertions(): void
+    public function testNativeGrantAllowsRepeatedExchangeWhileAssertionIsValid(): void
     {
         $server = $this->environment->server();
         $request = $this->environment->request();
         $this->connection->beginTransaction();
 
         try {
-            $this->assertSame(200, $server->respondToAccessTokenRequest($request, new Response())->getStatusCode());
-            $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
-            $this->assertSame(200, $server->respondToAccessTokenRequest($request, new Response())->getStatusCode());
+            $first = OAuthResponse::body(
+                $server->respondToAccessTokenRequest($request, new Response()),
+            );
+            $second = OAuthResponse::body(
+                $server->respondToAccessTokenRequest($request, new Response()),
+            );
+            $this->assertNotSame($first['access_token'], $second['access_token']);
             $this->assertSame(2, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
         } finally {
             $this->connection->rollBack();
@@ -87,7 +86,6 @@ final class LeagueGrantTest extends TestCase
                 200,
                 $this->environment->server()->respondToAccessTokenRequest($request, new Response())->getStatusCode(),
             );
-            $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
         } finally {
             $this->connection->rollBack();
         }
@@ -145,7 +143,7 @@ final class LeagueGrantTest extends TestCase
      * @param array<string, mixed> $body
      */
     #[DataProvider('invalidRequests')]
-    public function testStandardErrorsLeaveNoTokenOrUsage(array $body, string $expectedError, string|null $header = null): void
+    public function testStandardErrorsLeaveNoToken(array $body, string $expectedError, string|null $header = null): void
     {
         $request = $this->environment->request($body);
 
@@ -222,38 +220,6 @@ final class LeagueGrantTest extends TestCase
         }
     }
 
-    public function testApplicationWrapperRejectsReplayAndRollsBackToken(): void
-    {
-        $request = $this->environment->request();
-        $this->environment->exchange($request);
-
-        try {
-            $this->environment->exchange($request);
-            $this->fail('Replay must fail.');
-        } catch (DomainException $exception) {
-            $this->assertSame('Application replay rejected.', $exception->getMessage());
-        }
-
-        $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
-        $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
-    }
-
-    public function testRechecksExpirationAfterUserResolution(): void
-    {
-        $this->environment->resolveUser = function (): string {
-            $this->environment->clock->time = $this->environment->clock->time->modify('+63 seconds');
-
-            return 'internal-7';
-        };
-        $this->expectException(OAuthServerException::class);
-
-        try {
-            $this->environment->exchange($this->environment->request());
-        } finally {
-            $this->assertEmptyDatabase();
-        }
-    }
-
     public function testGrantRechecksExpirationAfterNativePersistence(): void
     {
         $this->environment->tokens->afterPersist = function (): void {
@@ -320,6 +286,5 @@ final class LeagueGrantTest extends TestCase
         // This independent connection observes durable rollback before retry.
         $observer = Postgres::connect('rollback-observer');
         $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM league_tokens'));
-        $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM assertion_uses'));
     }
 }

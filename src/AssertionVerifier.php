@@ -85,7 +85,7 @@ final class AssertionVerifier
     }
 
     /**
-     * Revalidate with fresh time after application locks or replay contention.
+     * Revalidate with fresh time after application work or lock waits.
      */
     public function assertValidAt(VerifiedAssertion $assertion): void
     {

@@ -14,8 +14,8 @@ use Noldors\OAuth2JwtBearer\TrustedIssuer;
 use Noldors\OAuth2JwtBearer\JwtBearerGrant;
 use League\OAuth2\Server\AuthorizationServer;
 use Noldors\OAuth2JwtBearer\AssertionVerifier;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Noldors\OAuth2JwtBearer\Contracts\KeyResolver;
-use Noldors\OAuth2JwtBearer\Contracts\SubjectResolver;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\JwtFactory;
 use League\OAuth2\Server\Exception\OAuthServerException;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\MutableClock;
@@ -26,7 +26,8 @@ use League\OAuth2\Server\Repositories\AccessTokenRepositoryInterface;
 
 final class ProviderLifecycleTest extends TestCase
 {
-    public function testRegistersGrantWhenAnotherProviderAlreadyResolvedServer(): void
+    #[DataProvider('serverResolutionOrders')]
+    public function testRegistersBoundRawGrantInEitherResolutionOrder(bool $alreadyResolved): void
     {
         $previous = Container::getInstance();
         $app = new Application(\sys_get_temp_dir());
@@ -43,11 +44,14 @@ final class ProviderLifecycleTest extends TestCase
                 new AssertionVerifier($this->createStub(KeyResolver::class), new MutableClock(), [
                     new TrustedIssuer('crm', 'client', 'mail'),
                 ]),
-                $this->createStub(SubjectResolver::class),
             );
             $app->bind(JwtBearerGrant::class, static fn (): JwtBearerGrant => $grant);
             $app->singleton(AuthorizationServer::class, static fn (): AuthorizationServer => $server);
-            $this->assertSame($server, $app->make(AuthorizationServer::class));
+
+            if ($alreadyResolved) {
+                $this->assertSame($server, $app->make(AuthorizationServer::class));
+            }
+
             new JwtBearerServiceProvider($app)->boot();
             $request = new ServerRequest('POST', 'https://mail.example/internal/token')->withParsedBody([
                 'grant_type' => JwtBearerGrant::IDENTIFIER,
@@ -64,5 +68,15 @@ final class ProviderLifecycleTest extends TestCase
         } finally {
             Container::setInstance($previous);
         }
+    }
+
+    /**
+     * @return iterable<string, array{bool}>
+     */
+    public static function serverResolutionOrders(): iterable
+    {
+        yield 'server already resolved' => [true];
+
+        yield 'server resolved after provider boot' => [false];
     }
 }
