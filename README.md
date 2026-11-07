@@ -39,13 +39,10 @@ $issuer = new TrustedIssuer(
     clientAuthentication: ClientAuthentication::OPTIONAL,
 );
 
-// $keys, $subjects and $usage implement the three application contracts below.
+// $keys and $subjects implement the two application contracts below.
 // $clock implements Psr\Clock\ClockInterface.
-$grant = new JwtBearerGrant(
-    new AssertionVerifier($keys, $clock, [$issuer]),
-    $subjects,
-    $usage,
-);
+$verifier = new AssertionVerifier($keys, $clock, [$issuer]);
+$grant = new JwtBearerGrant($verifier, $subjects);
 
 $authorizationServer->enableGrantType($grant, new DateInterval('PT1H'));
 ```
@@ -56,9 +53,8 @@ The application implements:
 
 - `KeyResolver::resolve(issuer, kid): ?VerificationKey`: obtain a trusted public key bound to one `Algorithm`. Missing/untrusted keys return `null`. Keep multiple trusted `kid` values during rotation. Never trust JWT-provided `jwk`, `jku`, `x5u` or certificates as key sources.
 - `SubjectResolver::resolve(VerifiedAssertion): string`: map the verified external subject to an existing eligible local user ID, acquiring application row locks if needed. Reject with `AssertionRejected`. An empty result is rejected.
-- `AssertionUsageRepository::record(VerifiedAssertion, AccessTokenEntityInterface): void`: atomically record the assertion ID and issued token in the application's issuance transaction. Reject duplicates with `AssertionRejected`.
 
-The usage repository is optional. When supplied, `jti` is mandatory even if omitted from `requiredClaims`. Without it, the package provides no replay protection. The verifier itself performs no writes. Application operational failures propagate instead of becoming JWT validation failures.
+The package does not store or consume assertions and has no replay/storage callback. The application owns replay policy and persistence in its complete issuance operation. It can retain `VerifiedAssertion` from `SubjectResolver`, perform its atomic `jti` → issued-token insert after the native AuthorizationServer response, and call the public `AssertionVerifier::assertValidAt()` again after possible insert contention, before committing. `jti` remains required by the default claim profile and can be configured through `requiredClaims`. Application operational failures propagate instead of becoming JWT validation failures.
 
 See [League setup](docs/league.md), [Passport setup](docs/passport.md), and the [transaction contract](docs/transactions.md).
 
@@ -98,7 +94,7 @@ If `iat` is intentionally optional, the maximum lifetime limits `exp` relative t
 
 `ClientAuthentication::REQUIRED` is the default and requires valid client credentials for the mapped client. `OPTIONAL` permits credentials to be omitted because a trusted issuer already maps to a specific OAuth client. If any client identification/credentials are supplied, both modes require authentication: form `client_id`/`client_secret` or HTTP Basic. A client ID alone is not an unauthenticated selector. Supplied credentials never override the issuer's configured client. Mixed authentication methods, malformed Authorization headers and unsupported `client_assertion` are rejected. Repositories remain responsible for client activity and allowed grants.
 
-Malformed/missing request parameters use League `invalid_request`; rejected assertions/replay/users use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens. Assertion failures retain `AssertionRejected` with a readonly `AssertionRejectionReason` through the OAuth exception’s `getPrevious()` chain. See [structured rejection and application audit](docs/rejections.md) for reason mapping, preserved per-exchange User/client context and application-exception passthrough.
+Malformed/missing request parameters use League `invalid_request`; rejected assertions/shared user rejections use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens. Assertion failures retain `AssertionRejected` with a readonly `AssertionRejectionReason` through the OAuth exception’s `getPrevious()` chain. See [structured rejection and application audit](docs/rejections.md) for reason mapping, preserved per-exchange User/client context and application-exception passthrough.
 
 ## Development
 

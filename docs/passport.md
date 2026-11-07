@@ -10,23 +10,25 @@ In your application provider's `register()` method, bind a fresh configured gran
 
 ```php
 use Noldors\OAuth2JwtBearer\{AssertionVerifier, JwtBearerGrant};
-use Noldors\OAuth2JwtBearer\Contracts\{AssertionUsageRepository, KeyResolver, SubjectResolver};
+use Noldors\OAuth2JwtBearer\Contracts\{KeyResolver, SubjectResolver};
 use Psr\Clock\ClockInterface;
 
+$this->app->singleton(AssertionVerifier::class, function ($app): AssertionVerifier {
+    return new AssertionVerifier(
+        $app->make(KeyResolver::class),
+        $app->make(ClockInterface::class),
+        $app->make(TrustedCrmIssuer::class)->profiles(),
+    );
+});
 $this->app->bind(JwtBearerGrant::class, function ($app): JwtBearerGrant {
     return new JwtBearerGrant(
-        new AssertionVerifier(
-            $app->make(KeyResolver::class),
-            $app->make(ClockInterface::class),
-            $app->make(TrustedCrmIssuer::class)->profiles(),
-        ),
+        $app->make(AssertionVerifier::class),
         $app->make(SubjectResolver::class),
-        $app->make(AssertionUsageRepository::class),
     );
 });
 ```
 
-`TrustedCrmIssuer` here is your application's configuration owner, returning the `TrustedIssuer` profile shown in the README; it is not a package class. Bind all three application contracts and the PSR clock before resolving AuthorizationServer. Supply per-invocation subject/audit context through application composition rather than retaining request state in a shared grant or resolver.
+`TrustedCrmIssuer` here is your application's configuration owner, returning the `TrustedIssuer` profile shown in the README; it is not a package class. Bind both application contracts and the PSR clock before resolving AuthorizationServer. Inject the same configured `AssertionVerifier` into the application issuance operation for its post-insert time check. Supply per-invocation subject/audit context through application composition rather than retaining request state in a shared grant or resolver.
 
 Create/use a normal Passport client and explicitly include `JwtBearerGrant::IDENTIFIER` in that client's `grant_types`, alongside any grants it already needs. Configure the profile's `clientId` to the actual stored client ID; do not derive it from `iss`. Revoked clients and clients lacking this grant are rejected through Passport/League. Standard Passport client-secret hashing and validation apply when credentials are supplied.
 
@@ -34,7 +36,7 @@ If you want the standard Passport token lifetime to be an hour, set `Passport::t
 
 ## Assertion-only application operation
 
-The operation, not a public input field, owns OAuth client parameters, empty scope and the transaction. The application's subject resolver can find an existing active user by external ID using `lockForUpdate()`, then return its internal ID. The grant rechecks the assertion time after this resolver returns, including after waiting on the lock.
+The application issuance operation owns OAuth client parameters, empty scope, the transaction and replay SQL. No replay service or repository contract is supplied by the package. The application's subject resolver can find an existing active user by external ID using `lockForUpdate()`, retain the `VerifiedAssertion` in the invocation context, then return the internal user ID. The grant rechecks the assertion time after this resolver returns, including after waiting on the lock.
 
 ```php
 use Illuminate\Support\Facades\DB;
@@ -49,12 +51,19 @@ $request = (new ServerRequest('POST', 'https://mail.example/internal/exchange'))
         'scope' => '',
     ]);
 
-$response = DB::transaction(
-    fn () => $authorizationServer->respondToAccessTokenRequest($request, new Response())
-);
+$response = DB::transaction(function () use ($authorizationServer, $request, $verifier, $context) {
+    $response = $authorizationServer->respondToAccessTokenRequest($request, new Response());
+    // Continue in the application use case: extract the issued token ID from
+    // its trusted native response, atomically insert jti -> token ID, handle
+    // duplicate-key replay, then recheck after possible SQL contention.
+    $verifier->assertValidAt($context->assertion);
+    return $response;
+});
 ```
 
-Inject the normal `AuthorizationServer` and the appropriate database connection into the complete application use case. This example uses the facade only to make the transaction boundary visible. The usage repository and Passport token model must share that connection; account for `passport.connection` and any custom Passport models. Do not wrap Passport's HTTP controller instead: an error converted to a response inside your transaction could commit a losing token. The direct AuthorizationServer call throws until handled outside the transaction.
+The example marks the application-owned insert step; the [complete transaction example](transactions.md) shows the atomic SQL and token-ID extraction. Keep that work directly in the complete issuance use case, such as `Token::issue`.
+
+Inject the normal `AuthorizationServer` and the appropriate database connection into the complete application use case. This example uses the facade only to make the transaction boundary visible. The application’s replay insert and Passport token model must share that connection; account for `passport.connection` and any custom Passport models. Do not wrap Passport's HTTP controller instead: an error converted to a response inside your transaction could commit a losing token. The direct AuthorizationServer call throws until handled outside the transaction.
 
 To keep Passport's HTTP routes closed, call `Passport::ignoreRoutes()` from an application provider's `register()` method, before Passport boots. The PSR request above needs no matching HTTP route. GraphQL can expose only `assertion` and translate the returned standard OAuth body into its application result.
 

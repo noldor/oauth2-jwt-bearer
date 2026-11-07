@@ -110,11 +110,11 @@ final class RejectionReasonTest extends TestCase
         $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
     }
 
-    public function testOwnUsageExceptionPassesThroughAndRollsBackBeforeRetry(): void
+    public function testApplicationFailureAfterResponseRollsBackBeforeRetry(): void
     {
         $failure = new DomainException('Application replay policy rejected the exchange.');
         $request = $this->environment->request();
-        $this->environment->usage->afterRecord = static fn (): never => throw $failure;
+        $this->environment->afterApplicationInsert = static fn (): never => throw $failure;
 
         try {
             $this->environment->exchange($request);
@@ -128,7 +128,7 @@ final class RejectionReasonTest extends TestCase
         $observer = Postgres::connect('structured-rejection-observer');
         $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM league_tokens'));
         $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM assertion_uses'));
-        $this->environment->usage->afterRecord = null;
+        $this->environment->afterApplicationInsert = null;
         $this->assertSame(200, $this->environment->exchange($request)->getStatusCode());
     }
 }

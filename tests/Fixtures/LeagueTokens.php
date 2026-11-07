@@ -5,6 +5,7 @@ declare(strict_types = 1);
 namespace Noldors\OAuth2JwtBearer\Tests\Fixtures;
 
 use PDO;
+use Closure;
 use RuntimeException;
 use League\OAuth2\Server\Entities\ScopeEntityInterface;
 use League\OAuth2\Server\Entities\ClientEntityInterface;
@@ -14,6 +15,11 @@ use League\OAuth2\Server\Repositories\AccessTokenRepositoryInterface;
 final class LeagueTokens implements AccessTokenRepositoryInterface
 {
     public bool $failPersistence = false;
+
+    /**
+     * @var (Closure(): void)|null
+     */
+    public Closure|null $afterPersist = null;
 
     public function __construct(
         private readonly PDO $connection,
@@ -51,6 +57,8 @@ final class LeagueTokens implements AccessTokenRepositoryInterface
         if ($this->failPersistence) {
             throw new RuntimeException('Injected persistence failure.');
         }
+
+        ($this->afterPersist ?? static function (): void {})();
     }
 
     public function revokeAccessToken(string $tokenId): void

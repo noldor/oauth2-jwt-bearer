@@ -13,7 +13,6 @@ use Noldors\OAuth2JwtBearer\Contracts\SubjectResolver;
 use League\OAuth2\Server\Entities\ClientEntityInterface;
 use League\OAuth2\Server\Exception\OAuthServerException;
 use League\OAuth2\Server\ResponseTypes\ResponseTypeInterface;
-use Noldors\OAuth2JwtBearer\Contracts\AssertionUsageRepository;
 
 final class JwtBearerGrant extends AbstractGrant
 {
@@ -22,7 +21,6 @@ final class JwtBearerGrant extends AbstractGrant
     public function __construct(
         private readonly AssertionVerifier $verifier,
         private readonly SubjectResolver $subjects,
-        private readonly AssertionUsageRepository|null $usage = null,
     ) {}
 
     public function getIdentifier(): string
@@ -62,7 +60,6 @@ final class JwtBearerGrant extends AbstractGrant
                 $client,
                 $userId,
             );
-            $this->requireReplayId($verified);
             $this->verifier->assertValidAt($verified);
 
             $accessToken = $this->issueAccessToken(
@@ -71,7 +68,6 @@ final class JwtBearerGrant extends AbstractGrant
                 $userId,
                 $scopes,
             );
-            $this->usage?->record($verified, $accessToken);
             $this->verifier->assertValidAt($verified);
         } catch (AssertionRejected $exception) {
             throw $this->invalidGrant($exception);
@@ -128,13 +124,6 @@ final class JwtBearerGrant extends AbstractGrant
                 'client_assertion',
                 'JWT client authentication is not supported by this grant.',
             );
-        }
-    }
-
-    private function requireReplayId(VerifiedAssertion $assertion): void
-    {
-        if (null !== $this->usage && null === $assertion->id) {
-            throw new AssertionRejected('Replay protection requires jti.', reason: AssertionRejectionReason::CLAIMS_INVALID);
         }
     }
 

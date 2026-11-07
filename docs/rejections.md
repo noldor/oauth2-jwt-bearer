@@ -11,8 +11,8 @@ try {
     $response = $connection->transaction(
         fn () => $server->respondToAccessTokenRequest($request, $responsePrototype)
     );
-} catch (OAuthServerException $exception) {
-    $rejection = $exception->getPrevious();
+} catch (OAuthServerException|AssertionRejected $exception) {
+    $rejection = $exception instanceof AssertionRejected ? $exception : $exception->getPrevious();
     if ($rejection instanceof AssertionRejected) {
         $reason = $rejection->reason;
         // Map $reason to the application's audit taxonomy after rollback.
@@ -32,7 +32,7 @@ The example's connection wrapper belongs to the application. When using PDO dire
 | `KEY_UNKNOWN` / `key_unknown` | Missing/invalid `kid`, or the trusted issuer-scoped key resolver returns no key |
 | `ALGORITHM_INVALID` / `algorithm_invalid` | Unsupported/disallowed `alg`, or the resolved key is bound to another algorithm |
 | `SIGNATURE_INVALID` / `signature_invalid` | Cryptographic signature verification failed |
-| `CLAIMS_INVALID` / `claims_invalid` | Untrusted issuer; missing/invalid claims, audience, lifetime or extra claim constraint; empty resolved user ID; missing replay ID |
+| `CLAIMS_INVALID` / `claims_invalid` | Untrusted issuer; missing/invalid claims, audience, lifetime or extra claim constraint; empty resolved user ID; a claim required by the configured profile |
 | `EXPIRED` / `expired` | Expiration is reached after applying the configured leeway |
 | `NOT_YET_VALID` / `not_yet_valid` | `iat` or `nbf` is later than the current time plus leeway |
 
@@ -44,13 +44,13 @@ An application can map these general reasons to existing audit values such as `a
 
 The application subject resolver can retain its existing User/model and the verified mapped client ID in an **invocation-local application context**. Populate it only after finding/locking an eligible user. The resolver receives `VerifiedAssertion`, and the grant has already resolved/authenticated its configured client before invoking it. The package never stores, resets or reconstructs that context and knows no domain User or audit service.
 
-If assertion time expires after the subject resolver or usage repository returns, the grant throws `invalid_grant` with `AssertionRejected::reason === EXPIRED` in its previous chain. The application context remains available after issuance rollback, so refusal audit can use the already-established trusted User/client. Capture the relevant identity snapshot at resolution; do not derive an identity by reparsing an invalid assertion or by querying a different user during error handling. Keep the context out of shared singleton/static state so one exchange cannot inherit another exchange's identity. Initial verification failures must not populate it.
+If assertion time expires after subject/scope work or native token persistence, the grant throws `invalid_grant` with `AssertionRejected::reason === EXPIRED` in its previous chain. If the application’s later replay insert waits, its own call to public `assertValidAt()` throws `AssertionRejected` directly, because that work is after the native grant response. Both paths expose the same structured reason; the application handles them at its own boundary. The application context remains available after issuance rollback, so refusal audit can use the already-established trusted User/client. Capture the relevant identity snapshot at resolution; do not derive an identity by reparsing an invalid assertion or by querying a different user during error handling. Keep the context out of shared singleton/static state so one exchange cannot inherit another exchange's identity. Initial verification failures must not populate it.
 
-Native League and Passport tests exercise this contract. Coordinated PostgreSQL workers also verify the reason and retained local identity after actual user-row lock waits and replay-insert contention, with all token/use writes rolled back.
+Native League and Passport tests exercise the grant and application-owned wrapper separately. Coordinated PostgreSQL workers also verify the reason and retained local identity after actual user-row lock waits and replay-insert contention, with all token/use writes rolled back.
 
 ## Exception and information boundaries
 
-Application-owned exceptions from `SubjectResolver`, `AssertionUsageRepository` or trusted key/configuration infrastructure propagate as the same throwable. Rate limits, missing/deleted users and application replay exceptions keep their own types, codes and safe metadata; the grant does not catch arbitrary `Throwable`. An application that deliberately throws `AssertionRejected` opts into the shared OAuth rejection conversion and may supply a reason explicitly:
+Application-owned exceptions from `SubjectResolver` or trusted key/configuration infrastructure propagate as the same throwable. Replay SQL and its exceptions live in the application issuance operation after the native response and are never intercepted by the grant. Rate limits, missing/deleted users and application replay exceptions keep their own types, codes and safe metadata; the grant does not catch arbitrary `Throwable`. An application that deliberately throws `AssertionRejected` opts into the shared OAuth rejection conversion and may supply a reason explicitly:
 
 ```php
 throw new AssertionRejected(

@@ -8,10 +8,16 @@ use PDO;
 use Closure;
 use Throwable;
 use DateInterval;
+use DateTimeZone;
+use LogicException;
+use DomainException;
 use Nyholm\Psr7\Response;
+use Lcobucci\JWT\Token\Parser;
 use Nyholm\Psr7\ServerRequest;
+use Lcobucci\JWT\UnencryptedToken;
 use League\OAuth2\Server\CryptKey;
 use Lcobucci\JWT\Signer\Key\InMemory;
+use Lcobucci\JWT\Encoding\JoseEncoder;
 use Noldors\OAuth2JwtBearer\Algorithm;
 use Psr\Http\Message\ResponseInterface;
 use Noldors\OAuth2JwtBearer\TrustedIssuer;
@@ -35,7 +41,12 @@ final class LeagueEnvironment
 {
     public readonly MutableClock $clock;
 
-    public readonly SqlAssertionUsage $usage;
+    /**
+     * @var (Closure(): void)|null test coordination inside the application wrapper only
+     */
+    public Closure|null $afterApplicationInsert = null;
+
+    public VerifiedAssertion|null $resolvedAssertion = null;
 
     public readonly LeagueTokens $tokens;
 
@@ -47,6 +58,11 @@ final class LeagueEnvironment
     public bool $requireAuthentication = false;
 
     public string $defaultScope = '';
+
+    /**
+     * @var list<non-empty-string>
+     */
+    public array $requiredClaims = ['iat', 'jti'];
 
     public string|null $signingKey = null;
 
@@ -60,11 +76,12 @@ final class LeagueEnvironment
      */
     public array|null $finalScopes = null;
 
+    private AssertionVerifier $verifier;
+
     public function __construct(
         public readonly PDO $connection,
     ) {
         $this->clock = new MutableClock();
-        $this->usage = new SqlAssertionUsage($connection);
         $this->tokens = new LeagueTokens($connection);
         $this->verificationKey = JwtFactory::keys('ed25519:crm')['public'];
     }
@@ -123,6 +140,8 @@ final class LeagueEnvironment
 
             public function resolve(VerifiedAssertion $assertion): string
             {
+                $this->environment->resolvedAssertion = $assertion;
+
                 if (null !== $this->environment->resolveUser) {
                     return ($this->environment->resolveUser)($assertion);
                 }
@@ -134,8 +153,9 @@ final class LeagueEnvironment
                 return 'internal-7';
             }
         };
-        $issuer = new TrustedIssuer('crm', 'oauth-client', 'mail', new AssertionRequirements(60, 3), $this->requireAuthentication ? ClientAuthentication::REQUIRED : ClientAuthentication::OPTIONAL);
-        $grant = new JwtBearerGrant(new AssertionVerifier($keys, $this->clock, [$issuer]), $subjects, $this->usage);
+        $issuer = new TrustedIssuer('crm', 'oauth-client', 'mail', new AssertionRequirements(60, 3, $this->requiredClaims), $this->requireAuthentication ? ClientAuthentication::REQUIRED : ClientAuthentication::OPTIONAL);
+        $this->verifier = new AssertionVerifier($keys, $this->clock, [$issuer]);
+        $grant = new JwtBearerGrant($this->verifier, $subjects);
         $server = new AuthorizationServer($clients, $this->tokens, $scopes, new CryptKey($this->signingKey ?? JwtFactory::keys('oauth')['private'], keyPermissionsCheck: false), 'test-encryption-key');
         $server->setDefaultScope($this->defaultScope);
         $server->enableGrantType($grant, new DateInterval('PT1H'));
@@ -166,10 +186,36 @@ final class LeagueEnvironment
 
     public function exchange(ServerRequestInterface $request): ResponseInterface
     {
+        $this->resolvedAssertion = null;
         $this->connection->beginTransaction();
 
         try {
             $response = $this->server()->respondToAccessTokenRequest($request, new Response());
+            $assertion = $this->requireResolvedAssertion();
+
+            if (null === $assertion->id) {
+                throw new LogicException('This application profile requires jti.');
+            }
+
+            $statement = $this->connection->prepare(
+                'INSERT INTO assertion_uses (issuer, jti, token_id, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT (issuer, jti) DO NOTHING',
+            );
+            $validUntil = $assertion->expiresAt->add(
+                new DateInterval('PT' . $assertion->issuer->requirements->leewaySeconds . 'S'),
+            );
+            $statement->execute([
+                $assertion->issuer->issuer,
+                $assertion->id,
+                $this->issuedTokenIdentifier($response),
+                $validUntil->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d\\TH:i:s.uP'),
+            ]);
+
+            if ($statement->rowCount() !== 1) {
+                throw new DomainException('Application replay rejected.');
+            }
+
+            ($this->afterApplicationInsert ?? static function (): void {})();
+            $this->verifier->assertValidAt($assertion);
             $this->connection->commit();
 
             return $response;
@@ -178,5 +224,33 @@ final class LeagueEnvironment
 
             throw $exception;
         }
+    }
+
+    private function requireResolvedAssertion(): VerifiedAssertion
+    {
+        return $this->resolvedAssertion ?? throw new LogicException('The application must retain the verified assertion.');
+    }
+
+    private function issuedTokenIdentifier(ResponseInterface $response): string
+    {
+        $body = \json_decode((string) $response->getBody(), true, flags: \JSON_THROW_ON_ERROR);
+
+        if (! \is_array($body) || ! \is_string($body['access_token'] ?? null) || '' === $body['access_token']) {
+            throw new LogicException('Expected the native access-token response.');
+        }
+
+        $token = new Parser(new JoseEncoder())->parse($body['access_token']);
+
+        if (! $token instanceof UnencryptedToken) {
+            throw new LogicException('Expected the native signed access token.');
+        }
+
+        $identifier = $token->claims()->get('jti');
+
+        if (! \is_string($identifier) || '' === $identifier) {
+            throw new LogicException('Expected the native token identifier.');
+        }
+
+        return $identifier;
     }
 }

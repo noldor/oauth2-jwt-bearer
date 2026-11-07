@@ -62,6 +62,8 @@ $request = (new ServerRequest('POST', 'https://mail.example/internal/exchange'))
 $connection->beginTransaction();
 try {
     $response = $authorizationServer->respondToAccessTokenRequest($request, new Response());
+    // The application may now perform its own atomic replay insert and call
+    // $verifier->assertValidAt($context->assertion) before committing.
     $connection->commit();
 } catch (Throwable $exception) {
     $connection->rollBack();
@@ -73,4 +75,4 @@ This URI is metadata for the in-memory PSR request, not a route that must exist.
 
 With `ClientAuthentication::REQUIRED`, supply the mapped client's correct `client_id` and `client_secret` in the server-owned body, or authenticate using HTTP Basic. With `OPTIONAL`, omit both. Credentials received by any direct OAuth request are still verified.
 
-Handle `OAuthServerException` outside the transaction and call `generateHttpResponse()` if exposing the standard OAuth error representation. GraphQL may instead translate that error at its normal application boundary. Never catch it inside a transaction and turn rejection into a successful transaction commit. See [transactions](transactions.md) for atomic replay storage and the actual League integration tests (`tests/Integration/LeagueGrantTest.php` in the source checkout).
+Handle `OAuthServerException` outside the transaction and call `generateHttpResponse()` if exposing the standard OAuth error representation. GraphQL may instead translate that error at its normal application boundary. Never catch it inside a transaction and turn rejection into a successful transaction commit. See [the complete application transaction example](transactions.md) for replay SQL after the native response and the actual League integration tests (`tests/Integration/LeagueGrantTest.php` in the source checkout).

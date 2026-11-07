@@ -9,11 +9,11 @@ The confirmed requirements need different boundaries:
 - Issuer is not assumed to be the OAuth client ID; subject is not assumed to be a local user ID.
 - Assertion maximum lifetime is independent of access-token TTL.
 - Issuer-scoped `kid` resolution, explicit per-key algorithm binding and a per-issuer allowlist establish trust outside the JWT.
-- Replay uses one application-defined atomic write linked to the actual League access token, rather than a separate replay lookup followed by persistence.
+- Replay belongs entirely to the complete application issuance operation, after the native response returns. The grant has no storage dependency or callback. An application may atomically link `(issuer, jti)` to the issued token and recheck time through the public verifier before committing.
 - The application transaction covers token persistence, replay recording, user row locks and response signing. No persistence implementation or cleanup schema is part of the core.
-- Time is checked again after subject resolution/scope finalization and after replay recording, because either application operation can wait.
+- The grant checks time after subject resolution/scope finalization and after native token persistence. If its own replay insert waits after the response, the application calls public `AssertionVerifier::assertValidAt()` again before commit.
 
-The public surface has one grant, verifier/configuration values, three application contracts and the standard Lcobucci constraint interface for extra claim requirements. A separate exchange framework, Laravel user abstraction, JWT client-authentication mechanism, key-discovery service and application audit layer are unnecessary for the confirmed consumer.
+The public surface has one grant, verifier/configuration values, two application contracts and the standard Lcobucci constraint interface for extra claim requirements. A separate exchange framework, Laravel user abstraction, JWT client-authentication mechanism, key-discovery service and application audit layer are unnecessary for the confirmed consumer.
 
 ## Algorithm identifiers
 
@@ -27,7 +27,7 @@ Key format validation requires raw Ed25519 public keys of exactly 32 bytes, exac
 
 ## First consumer: serton-mail
 
-The agreed profile now uses **Ed25519 with `alg: Ed25519`**, superseding the initial RS256 profile. A separate one-time CRM confirmation supplies trusted `iss`, `aud`, `kid`, external `sub` and mandatory `iat`, `exp`, `jti`. Lifetime is `0 < exp - iat <= 60` seconds; leeway is 3 seconds; `nbf` is supported. The application finds and locks an existing active user and supplies its internal ID. The same SQL transaction persists the Passport token and assertion use; a post-wait clock check rejects expired assertions. The access token lasts one hour, with an empty scope request and no refresh token.
+The agreed profile now uses **Ed25519 with `alg: Ed25519`**, superseding the initial RS256 profile. A separate one-time CRM confirmation supplies trusted `iss`, `aud`, `kid`, external `sub` and mandatory `iat`, `exp`, `jti`. Lifetime is `0 < exp - iat <= 60` seconds; leeway is 3 seconds; `nbf` is supported. The application finds and locks an existing active user and supplies its internal ID. The application issuance operation uses the same SQL transaction for the native response, its own replay insert and the public post-insert clock check. The package stores no assertion use. The access token lasts one hour, with an empty scope request and no refresh token.
 
 GraphQL accepts only the assertion. A server-owned adapter constructs OAuth parameters and calls the standard AuthorizationServer without publishing Passport routes. Activity checks, rate limits, user locks and refusal audit remain in the consuming application. Successful issuance is not sent to application audit. Native League/Passport lifecycle events retain their normal framework semantics.
 

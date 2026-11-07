@@ -6,6 +6,7 @@ namespace Noldors\OAuth2JwtBearer\Tests\Integration;
 
 use Closure;
 use DateInterval;
+use DateTimeZone;
 use LogicException;
 use DomainException;
 use RuntimeException;
@@ -49,7 +50,6 @@ use Noldors\OAuth2JwtBearer\Tests\Fixtures\MutableClock;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\PassportUser;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\OAuthResponse;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\RejectionCases;
-use Noldors\OAuth2JwtBearer\Tests\Fixtures\SqlAssertionUsage;
 use Noldors\OAuth2JwtBearer\Passport\JwtBearerServiceProvider;
 
 final class PassportGrantTest extends TestCase
@@ -68,7 +68,14 @@ final class PassportGrantTest extends TestCase
 
     private Closure|null $afterResolution = null;
 
-    private SqlAssertionUsage $usage;
+    /**
+     * @var (Closure(): void)|null test coordination in the application transaction only
+     */
+    private Closure|null $afterApplicationInsert = null;
+
+    private AssertionVerifier $verifier;
+
+    private VerifiedAssertion|null $resolvedAssertion = null;
 
     protected function setUp(): void
     {
@@ -344,7 +351,7 @@ final class PassportGrantTest extends TestCase
         if ('subject' === $stage) {
             $this->afterResolution = $expire;
         } else {
-            $this->usage->afterRecord = $expire;
+            $this->afterApplicationInsert = $expire;
         }
 
         try {
@@ -352,8 +359,12 @@ final class PassportGrantTest extends TestCase
             $this->fail(
                 'The expired assertion must be rejected after application work.',
             );
-        } catch (OAuthServerException $exception) {
-            $previous = $exception->getPrevious();
+        } catch (AssertionRejected|OAuthServerException $exception) {
+            $this->assertInstanceOf(
+                'subject' === $stage ? OAuthServerException::class : AssertionRejected::class,
+                $exception,
+            );
+            $previous = $exception instanceof AssertionRejected ? $exception : $exception->getPrevious();
             $this->assertInstanceOf(AssertionRejected::class, $previous);
             $this->assertSame(AssertionRejectionReason::EXPIRED, $previous->reason);
         }
@@ -374,7 +385,7 @@ final class PassportGrantTest extends TestCase
         if ('subject' === $stage) {
             $this->afterResolution = $reject;
         } else {
-            $this->usage->afterRecord = $reject;
+            $this->afterApplicationInsert = $reject;
         }
 
         try {
@@ -399,7 +410,7 @@ final class PassportGrantTest extends TestCase
     {
         yield 'after user resolution' => ['subject'];
 
-        yield 'after usage recording' => ['usage'];
+        yield 'after application replay insert' => ['application_insert'];
     }
 
     protected function getPackageProviders($app): array
@@ -449,6 +460,7 @@ final class PassportGrantTest extends TestCase
             }
         };
         $onResolved = function (VerifiedAssertion $assertion, PassportUser $user): void {
+            $this->resolvedAssertion = $assertion;
             $this->resolvedUser = $user;
             $this->resolvedClientId = $assertion->issuer->clientId;
             ($this->afterResolution ?? static function (): void {})();
@@ -475,8 +487,8 @@ final class PassportGrantTest extends TestCase
             }
         };
         $issuer = new TrustedIssuer('crm', self::CLIENT_ID, 'mail', new AssertionRequirements(60, 3), ClientAuthentication::OPTIONAL);
-        $this->usage = new SqlAssertionUsage(DB::connection()->getPdo());
-        $grant = new JwtBearerGrant(new AssertionVerifier($keys, $this->clock, [$issuer]), $subjects, $this->usage);
+        $this->verifier = new AssertionVerifier($keys, $this->clock, [$issuer]);
+        $grant = new JwtBearerGrant($this->verifier, $subjects);
         $this->application->bind(JwtBearerGrant::class, static fn (): JwtBearerGrant => $grant);
     }
 
@@ -485,6 +497,9 @@ final class PassportGrantTest extends TestCase
      */
     private function exchange(array $parameters = []): ResponseInterface
     {
+        $this->resolvedAssertion = null;
+        $this->resolvedUser = null;
+        $this->resolvedClientId = null;
         $claims = [
             'iss' => 'crm',
             'sub' => 'external-42',
@@ -501,7 +516,32 @@ final class PassportGrantTest extends TestCase
         ]);
 
         return DB::transaction(
-            fn (): ResponseInterface => $this->application->make(AuthorizationServer::class)->respondToAccessTokenRequest($request, new Response()),
+            function () use ($request): ResponseInterface {
+                $response = $this->application->make(AuthorizationServer::class)
+                    ->respondToAccessTokenRequest($request, new Response());
+                $assertion = $this->resolvedAssertion ?? throw new LogicException('The application must retain the verified assertion.');
+                $body = OAuthResponse::body($response);
+                $tokenId = OAuthResponse::token($body['access_token'])->claims()->get('jti');
+                $this->assertIsString($tokenId);
+                $validUntil = $assertion->expiresAt->add(
+                    new DateInterval('PT' . $assertion->issuer->requirements->leewaySeconds . 'S'),
+                );
+                $inserted = DB::table('assertion_uses')->insertOrIgnore([
+                    'issuer' => $assertion->issuer->issuer,
+                    'jti' => $assertion->id,
+                    'token_id' => $tokenId,
+                    'expires_at' => $validUntil->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d\\TH:i:s.uP'),
+                ]);
+
+                if (1 !== $inserted) {
+                    throw new DomainException('Application replay rejected.');
+                }
+
+                ($this->afterApplicationInsert ?? static function (): void {})();
+                $this->verifier->assertValidAt($assertion);
+
+                return $response;
+            },
         );
     }
 }

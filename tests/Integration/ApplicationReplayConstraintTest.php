@@ -11,7 +11,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\Postgres;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\LeagueEnvironment;
 
-final class AssertionUsageConstraintTest extends TestCase
+final class ApplicationReplayConstraintTest extends TestCase
 {
     private PDO $connection;
 

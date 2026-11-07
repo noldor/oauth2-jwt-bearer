@@ -38,13 +38,13 @@ $environment->resolveUser = static function (VerifiedAssertion $assertion) use (
 };
 
 if ($input['expireAfterUsage'] ?? false) {
-    $environment->usage->afterRecord = static function () use ($environment): void {
+    $environment->afterApplicationInsert = static function () use ($environment): void {
         $environment->clock->time = $environment->clock->time->modify('+63 seconds');
     };
 }
 
 if (isset($input['gate'])) {
-    $environment->usage->afterRecord = static function () use ($input): void {
+    $environment->afterApplicationInsert = static function () use ($input): void {
         \touch($input['gate'] . '.ready');
         $deadline = \microtime(true) + 10;
 
@@ -81,15 +81,15 @@ $request = new ServerRequest('POST', 'https://oauth.example/token')->withParsedB
 try {
     $environment->exchange($request);
     \fwrite(\STDOUT, 'success');
-} catch (OAuthServerException $exception) {
+} catch (AssertionRejected|DomainException|OAuthServerException $exception) {
     if ($input['structuredError'] ?? false) {
-        $previous = $exception->getPrevious();
+        $previous = $exception instanceof AssertionRejected ? $exception : $exception->getPrevious();
         \fwrite(\STDOUT, \json_encode([
-            'error' => $exception->getErrorType(),
+            'error' => $exception instanceof OAuthServerException ? $exception->getErrorType() : 'application_rejection',
             'reason' => $previous instanceof AssertionRejected ? $previous->reason->value : null,
             'identity' => $resolvedIdentity,
         ], \JSON_THROW_ON_ERROR));
     } else {
-        \fwrite(\STDOUT, $exception->getErrorType());
+        \fwrite(\STDOUT, $exception instanceof OAuthServerException ? $exception->getErrorType() : 'application_rejection');
     }
 }

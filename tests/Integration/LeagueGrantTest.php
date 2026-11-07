@@ -5,6 +5,7 @@ declare(strict_types = 1);
 namespace Noldors\OAuth2JwtBearer\Tests\Integration;
 
 use PDO;
+use DomainException;
 use RuntimeException;
 use Nyholm\Psr7\Response;
 use Nyholm\Psr7\ServerRequest;
@@ -50,6 +51,46 @@ final class LeagueGrantTest extends TestCase
             Postgres::value($this->connection, 'SELECT token_id FROM assertion_uses'),
         );
         $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
+    }
+
+    public function testNativeGrantDoesNotWriteOrConsumeAssertions(): void
+    {
+        $server = $this->environment->server();
+        $request = $this->environment->request();
+        $this->connection->beginTransaction();
+
+        try {
+            $this->assertSame(200, $server->respondToAccessTokenRequest($request, new Response())->getStatusCode());
+            $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
+            $this->assertSame(200, $server->respondToAccessTokenRequest($request, new Response())->getStatusCode());
+            $this->assertSame(2, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
+        } finally {
+            $this->connection->rollBack();
+        }
+    }
+
+    public function testNativeGrantCanUseAProfileWithoutRequiredJti(): void
+    {
+        $this->environment->requiredClaims = ['iat'];
+        $assertion = JwtFactory::assertion([
+            'iss' => 'crm',
+            'sub' => 'external-42',
+            'aud' => 'mail',
+            'iat' => $this->environment->clock->now()->getTimestamp(),
+            'exp' => $this->environment->clock->now()->getTimestamp() + 60,
+        ], ['alg' => 'Ed25519']);
+        $request = $this->environment->request(['assertion' => $assertion]);
+        $this->connection->beginTransaction();
+
+        try {
+            $this->assertSame(
+                200,
+                $this->environment->server()->respondToAccessTokenRequest($request, new Response())->getStatusCode(),
+            );
+            $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
+        } finally {
+            $this->connection->rollBack();
+        }
     }
 
     public function testExplicitEmptyScopeOverridesServerDefault(): void
@@ -181,7 +222,7 @@ final class LeagueGrantTest extends TestCase
         }
     }
 
-    public function testReplayCannotIssueAnotherToken(): void
+    public function testApplicationWrapperRejectsReplayAndRollsBackToken(): void
     {
         $request = $this->environment->request();
         $this->environment->exchange($request);
@@ -189,8 +230,8 @@ final class LeagueGrantTest extends TestCase
         try {
             $this->environment->exchange($request);
             $this->fail('Replay must fail.');
-        } catch (OAuthServerException $exception) {
-            $this->assertSame('invalid_grant', $exception->getErrorType());
+        } catch (DomainException $exception) {
+            $this->assertSame('Application replay rejected.', $exception->getMessage());
         }
 
         $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
@@ -213,9 +254,9 @@ final class LeagueGrantTest extends TestCase
         }
     }
 
-    public function testRechecksExpirationAfterUsageRecording(): void
+    public function testGrantRechecksExpirationAfterNativePersistence(): void
     {
-        $this->environment->usage->afterRecord = function (): void {
+        $this->environment->tokens->afterPersist = function (): void {
             $this->environment->clock->time = $this->environment->clock->time->modify('+63 seconds');
         };
         $this->expectException(OAuthServerException::class);

@@ -66,7 +66,7 @@ final class ConcurrentExchangeTest extends TestCase
         $this->waitForDatabaseLock('jwt-race-second');
         \touch($this->directory . '/gate.release');
         $this->assertSame('success', $this->finishWorker($first));
-        $this->assertSame('invalid_grant', $this->finishWorker($second));
+        $this->assertSame('application_rejection', $this->finishWorker($second));
         $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
         $this->assertSame(1, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
         $this->assertSame(
@@ -115,7 +115,7 @@ final class ConcurrentExchangeTest extends TestCase
         $this->waitForDatabaseLock('jwt-usage-expiry');
         $this->connection->rollBack();
         $this->assertSame([
-            'error' => 'invalid_grant',
+            'error' => 'application_rejection',
             'reason' => 'expired',
             'identity' => ['userId' => 'internal-7', 'clientId' => 'oauth-client'],
         ], \json_decode($this->finishWorker($worker), true, flags: \JSON_THROW_ON_ERROR));
