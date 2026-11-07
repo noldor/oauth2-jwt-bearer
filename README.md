@@ -98,7 +98,7 @@ If `iat` is intentionally optional, the maximum lifetime limits `exp` relative t
 
 `ClientAuthentication::REQUIRED` is the default and requires valid client credentials for the mapped client. `OPTIONAL` permits credentials to be omitted because a trusted issuer already maps to a specific OAuth client. If any client identification/credentials are supplied, both modes require authentication: form `client_id`/`client_secret` or HTTP Basic. A client ID alone is not an unauthenticated selector. Supplied credentials never override the issuer's configured client. Mixed authentication methods, malformed Authorization headers and unsupported `client_assertion` are rejected. Repositories remain responsible for client activity and allowed grants.
 
-Malformed/missing request parameters use League `invalid_request`; rejected assertions/replay/users use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens.
+Malformed/missing request parameters use League `invalid_request`; rejected assertions/replay/users use `invalid_grant`; invalid credentials use `invalid_client`; disallowed grants use `unauthorized_client`; unknown scopes use `invalid_scope`. League builds the standard OAuth response/error representation. The grant never issues refresh tokens. Assertion failures retain `AssertionRejected` with a readonly `AssertionRejectionReason` through the OAuth exception’s `getPrevious()` chain. See [structured rejection and application audit](docs/rejections.md) for reason mapping, preserved per-exchange User/client context and application-exception passthrough.
 
 ## Development
 

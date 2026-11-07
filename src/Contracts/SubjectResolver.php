@@ -10,6 +10,7 @@ interface SubjectResolver
 {
     /**
      * Resolve an existing, eligible user; acquire application locks here if necessary.
+     * Own application exceptions propagate unchanged. AssertionRejected opts into OAuth invalid_grant.
      *
      * @return string local user identifier; empty results are rejected by the grant
      *

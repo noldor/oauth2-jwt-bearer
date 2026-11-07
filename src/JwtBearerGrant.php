@@ -53,7 +53,7 @@ final class JwtBearerGrant extends AbstractGrant
             $userId = $this->subjects->resolve($verified);
 
             if ('' === $userId) {
-                throw new AssertionRejected('Subject does not resolve to a user.');
+                throw new AssertionRejected('Subject does not resolve to a user.', reason: AssertionRejectionReason::CLAIMS_INVALID);
             }
 
             $scopes = $this->scopeRepository->finalizeScopes(
@@ -73,8 +73,8 @@ final class JwtBearerGrant extends AbstractGrant
             );
             $this->usage?->record($verified, $accessToken);
             $this->verifier->assertValidAt($verified);
-        } catch (AssertionRejected) {
-            throw OAuthServerException::invalidGrant('The JWT assertion is invalid.');
+        } catch (AssertionRejected $exception) {
+            throw $this->invalidGrant($exception);
         }
 
         $responseType->setAccessToken($accessToken);
@@ -134,7 +134,21 @@ final class JwtBearerGrant extends AbstractGrant
     private function requireReplayId(VerifiedAssertion $assertion): void
     {
         if (null !== $this->usage && null === $assertion->id) {
-            throw new AssertionRejected('Replay protection requires jti.');
+            throw new AssertionRejected('Replay protection requires jti.', reason: AssertionRejectionReason::CLAIMS_INVALID);
         }
+    }
+
+    private function invalidGrant(AssertionRejected $rejection): OAuthServerException
+    {
+        $error = OAuthServerException::invalidGrant('The JWT assertion is invalid.');
+
+        return new OAuthServerException(
+            $error->getMessage(),
+            $error->getCode(),
+            $error->getErrorType(),
+            $error->getHttpStatusCode(),
+            $error->getHint(),
+            previous: $rejection,
+        );
     }
 }

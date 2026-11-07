@@ -62,3 +62,11 @@ All findings originated in this new package; no pre-existing repository findings
 | Code quality | P2 explicit empty scope; P2 already-resolved server registration; no open findings |
 | Security | P2 scope escalation; historical type-change hypothesis reproduced and corrected with native controls; no open findings or validation hypotheses |
 | Standards compliance | P2 CI secret gate; P3 replay-fixture FK and controls; broken-symlink coverage corrected; no open findings |
+
+## Structured rejection follow-up — 2026-11-07
+
+The follow-up against package commit `8632383` preserves refusal-audit reasons without moving application audit or User models into the core. `AssertionRejected::reason` exposes `AssertionRejectionReason`; the original rejection remains the native OAuth exception's previous object while the `invalid_grant` payload stays generic. Own consumer exceptions remain unwrapped. Package-created parser/constraint rejections omit potentially input-bearing vendor diagnostics. See [the public rejection contract](rejections.md).
+
+Test-first evidence covered the missing previous exception (12 failing reason cases before the change) and the NumericDate classification boundary (both League and Passport failed the `exp: 'never'` case before raw-type classification was corrected). Native integration tests now cover every reason, exact original exception/previous-chain identity, application-exception passthrough, safe payloads, refusal context after subject/usage expiry and durable rollback. Three independent-process PostgreSQL cases observe real replay/user-lock/usage-contention waits, including the structured expiry reason and retained invocation-local identity.
+
+The completed full local gate passed **143 tests / 578 assertions** with random seed `1794068217`, the shared formatter, PHPStan max and pinned phanalist. The actual Composer path consumer also passed both a successful League exchange and a structured rejection with Laravel and Passport absent. Local documentation links and current/index secret scanning passed. Dependencies, lock and scanner configuration are unchanged; the earlier locked-advisory and native scanner-control evidence remains applicable. Final committed-history scanning is performed before the handoff. No package publication or consumer repository mutation is part of this follow-up.

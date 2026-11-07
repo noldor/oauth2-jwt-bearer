@@ -90,10 +90,35 @@ final class ConcurrentExchangeTest extends TestCase
         $this->connection->exec(
             "UPDATE locked_users SET current_time_value = '2026-11-07T12:01:03Z' WHERE id = 1",
         );
-        $worker = $this->startWorker('jwt-user-lock', ['lockUser' => true]);
+        $worker = $this->startWorker('jwt-user-lock', ['lockUser' => true, 'structuredError' => true]);
         $this->waitForDatabaseLock('jwt-user-lock');
         $this->connection->commit();
-        $this->assertSame('invalid_grant', $this->finishWorker($worker));
+        $this->assertSame([
+            'error' => 'invalid_grant',
+            'reason' => 'expired',
+            'identity' => ['userId' => 'internal-7', 'clientId' => 'oauth-client'],
+        ], \json_decode($this->finishWorker($worker), true, flags: \JSON_THROW_ON_ERROR));
+        $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
+        $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
+    }
+
+    public function testExpiryAfterUsageContentionKeepsReasonAndIdentity(): void
+    {
+        $this->connection->beginTransaction();
+        $this->connection->exec(
+            "INSERT INTO league_tokens (id, user_id, client_id, scopes) VALUES ('blocking-token', 'internal-7', 'oauth-client', '[]')",
+        );
+        $this->connection->exec(
+            "INSERT INTO assertion_uses VALUES ('crm', 'once', 'blocking-token', '2026-11-07T12:01:03Z')",
+        );
+        $worker = $this->startWorker('jwt-usage-expiry', ['expireAfterUsage' => true, 'structuredError' => true]);
+        $this->waitForDatabaseLock('jwt-usage-expiry');
+        $this->connection->rollBack();
+        $this->assertSame([
+            'error' => 'invalid_grant',
+            'reason' => 'expired',
+            'identity' => ['userId' => 'internal-7', 'clientId' => 'oauth-client'],
+        ], \json_decode($this->finishWorker($worker), true, flags: \JSON_THROW_ON_ERROR));
         $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM league_tokens'));
         $this->assertSame(0, (int) Postgres::value($this->connection, 'SELECT COUNT(*) FROM assertion_uses'));
     }

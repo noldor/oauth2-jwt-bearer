@@ -4,8 +4,10 @@ declare(strict_types = 1);
 
 namespace Noldors\OAuth2JwtBearer\Tests\Integration;
 
+use Closure;
 use DateInterval;
 use LogicException;
+use DomainException;
 use RuntimeException;
 use Nyholm\Psr7\Response;
 use Laravel\Passport\Token;
@@ -33,17 +35,20 @@ use League\OAuth2\Server\AuthorizationServer;
 use Noldors\OAuth2JwtBearer\AssertionRejected;
 use Noldors\OAuth2JwtBearer\AssertionVerifier;
 use Noldors\OAuth2JwtBearer\VerifiedAssertion;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Noldors\OAuth2JwtBearer\ClientAuthentication;
 use Laravel\Passport\Bridge\AccessTokenRepository;
 use Noldors\OAuth2JwtBearer\AssertionRequirements;
 use Noldors\OAuth2JwtBearer\Contracts\KeyResolver;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\Postgres;
+use Noldors\OAuth2JwtBearer\AssertionRejectionReason;
 use Noldors\OAuth2JwtBearer\Contracts\SubjectResolver;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\JwtFactory;
 use League\OAuth2\Server\Exception\OAuthServerException;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\MutableClock;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\PassportUser;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\OAuthResponse;
+use Noldors\OAuth2JwtBearer\Tests\Fixtures\RejectionCases;
 use Noldors\OAuth2JwtBearer\Tests\Fixtures\SqlAssertionUsage;
 use Noldors\OAuth2JwtBearer\Passport\JwtBearerServiceProvider;
 
@@ -56,6 +61,14 @@ final class PassportGrantTest extends TestCase
     private MutableClock $clock;
 
     private PassportUser $user;
+
+    private PassportUser|null $resolvedUser = null;
+
+    private string|null $resolvedClientId = null;
+
+    private Closure|null $afterResolution = null;
+
+    private SqlAssertionUsage $usage;
 
     protected function setUp(): void
     {
@@ -282,6 +295,113 @@ final class PassportGrantTest extends TestCase
         $this->assertSame(0, DB::table('assertion_uses')->count());
     }
 
+    /**
+     * @param array{claims?: array<string, mixed>, headers?: array<string, mixed>, raw?: string, signingKey?: string} $changes
+     */
+    #[DataProvider('rejections')]
+    public function testPassportPreservesStructuredReason(array $changes, string $reason): void
+    {
+        $assertion = RejectionCases::assertion($changes);
+
+        try {
+            $this->exchange(['assertion' => $assertion]);
+            $this->fail(
+                'The invalid assertion must be rejected.',
+            );
+        } catch (OAuthServerException $exception) {
+            $this->assertSame('invalid_grant', $exception->getErrorType());
+            $previous = $exception->getPrevious();
+            $this->assertInstanceOf(AssertionRejected::class, $previous);
+            $this->assertSame(AssertionRejectionReason::from($reason), $previous->reason);
+            $this->assertSame(
+                OAuthServerException::invalidGrant('The JWT assertion is invalid.')->getPayload(),
+                $exception->getPayload(),
+            );
+            $this->assertStringNotContainsString($assertion, $previous->getMessage());
+        }
+
+        $this->assertNull($this->resolvedUser);
+        $this->assertNull($this->resolvedClientId);
+        $this->assertSame(0, Token::query()->count());
+        $this->assertSame(0, DB::table('assertion_uses')->count());
+    }
+
+    /**
+     * @return iterable<string, array{array{claims?: array<string, mixed>, headers?: array<string, mixed>, raw?: string, signingKey?: string}, string}>
+     */
+    public static function rejections(): iterable
+    {
+        return RejectionCases::cases();
+    }
+
+    #[DataProvider('expiryRecheckStages')]
+    public function testPostWaitExpiryPreservesApplicationIdentityContext(string $stage): void
+    {
+        $expire = function (): void {
+            $this->clock->time = $this->clock->time->modify('+63 seconds');
+        };
+
+        if ('subject' === $stage) {
+            $this->afterResolution = $expire;
+        } else {
+            $this->usage->afterRecord = $expire;
+        }
+
+        try {
+            $this->exchange();
+            $this->fail(
+                'The expired assertion must be rejected after application work.',
+            );
+        } catch (OAuthServerException $exception) {
+            $previous = $exception->getPrevious();
+            $this->assertInstanceOf(AssertionRejected::class, $previous);
+            $this->assertSame(AssertionRejectionReason::EXPIRED, $previous->reason);
+        }
+
+        $this->assertSame($this->user->id, $this->resolvedUser?->id);
+        $this->assertSame(self::CLIENT_ID, $this->resolvedClientId);
+        $observer = Postgres::connect('passport-context-rollback');
+        $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM passport_test.oauth_access_tokens'));
+        $this->assertSame(0, (int) Postgres::value($observer, 'SELECT COUNT(*) FROM passport_test.assertion_uses'));
+    }
+
+    #[DataProvider('expiryRecheckStages')]
+    public function testApplicationExceptionsRemainUnwrappedAndRollback(string $stage): void
+    {
+        $failure = new DomainException('Application policy rejected the exchange.');
+        $reject = static fn (): never => throw $failure;
+
+        if ('subject' === $stage) {
+            $this->afterResolution = $reject;
+        } else {
+            $this->usage->afterRecord = $reject;
+        }
+
+        try {
+            $this->exchange();
+            $this->fail(
+                'The application exception must propagate.',
+            );
+        } catch (DomainException $exception) {
+            $this->assertSame($failure, $exception);
+        }
+
+        $this->assertSame($this->user->id, $this->resolvedUser?->id);
+        $this->assertSame(self::CLIENT_ID, $this->resolvedClientId);
+        $this->assertSame(0, Token::query()->count());
+        $this->assertSame(0, DB::table('assertion_uses')->count());
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function expiryRecheckStages(): iterable
+    {
+        yield 'after user resolution' => ['subject'];
+
+        yield 'after usage recording' => ['usage'];
+    }
+
     protected function getPackageProviders($app): array
     {
         return [PassportServiceProvider::class, JwtBearerServiceProvider::class];
@@ -328,7 +448,19 @@ final class PassportGrantTest extends TestCase
                     : null;
             }
         };
-        $subjects = new class () implements SubjectResolver {
+        $onResolved = function (VerifiedAssertion $assertion, PassportUser $user): void {
+            $this->resolvedUser = $user;
+            $this->resolvedClientId = $assertion->issuer->clientId;
+            ($this->afterResolution ?? static function (): void {})();
+        };
+        $subjects = new class ($onResolved) implements SubjectResolver {
+            /**
+             * @param Closure(VerifiedAssertion, PassportUser): void $onResolved
+             */
+            public function __construct(
+                private readonly Closure $onResolved,
+            ) {}
+
             public function resolve(VerifiedAssertion $assertion): string
             {
                 $user = PassportUser::query()->where('external_id', $assertion->subject)->lockForUpdate()->first();
@@ -337,11 +469,14 @@ final class PassportGrantTest extends TestCase
                     throw new AssertionRejected('No eligible user.');
                 }
 
+                ($this->onResolved)($assertion, $user);
+
                 return (string) $user->id;
             }
         };
         $issuer = new TrustedIssuer('crm', self::CLIENT_ID, 'mail', new AssertionRequirements(60, 3), ClientAuthentication::OPTIONAL);
-        $grant = new JwtBearerGrant(new AssertionVerifier($keys, $this->clock, [$issuer]), $subjects, new SqlAssertionUsage(DB::connection()->getPdo()));
+        $this->usage = new SqlAssertionUsage(DB::connection()->getPdo());
+        $grant = new JwtBearerGrant(new AssertionVerifier($keys, $this->clock, [$issuer]), $subjects, $this->usage);
         $this->application->bind(JwtBearerGrant::class, static fn (): JwtBearerGrant => $grant);
     }
 

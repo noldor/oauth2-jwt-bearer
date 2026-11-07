@@ -11,7 +11,8 @@ interface AssertionUsageRepository
 {
     /**
      * Atomically record (issuer, jti) and the token in the issuance transaction.
-     * Reject duplicates with AssertionRejected. Retain the record through exp + leeway.
+     * Reject duplicates with an application exception (propagated unchanged), or opt into
+     * OAuth invalid_grant with AssertionRejected. Retain the record through exp + leeway.
      * The caller must wrap the entire AuthorizationServer response, including signing,
      * in a transaction shared by token persistence, user locks and this repository.
      *

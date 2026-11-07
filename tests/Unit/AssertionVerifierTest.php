@@ -216,6 +216,30 @@ final class AssertionVerifierTest extends TestCase
         $this->verifier->assertValidAt($verified);
     }
 
+    public function testVendorClaimDiagnosticIsNotRetainedInRejection(): void
+    {
+        $constraint = new class () implements \Lcobucci\JWT\Validation\Constraint {
+            public function assert(\Lcobucci\JWT\Token $token): void
+            {
+                throw \Lcobucci\JWT\Validation\ConstraintViolation::error('Sensitive claim diagnostic.', $this);
+            }
+        };
+        $verifier = $this->verifierFor(
+            new AssertionRequirements(constraints: [$constraint]),
+        );
+
+        try {
+            $verifier->verify(JwtFactory::assertion($this->claims()));
+            $this->fail(
+                'The claim constraint must reject the assertion.',
+            );
+        } catch (AssertionRejected $exception) {
+            $this->assertSame(\Noldors\OAuth2JwtBearer\AssertionRejectionReason::CLAIMS_INVALID, $exception->reason);
+            $this->assertNull($exception->getPrevious());
+            $this->assertStringNotContainsString('Sensitive claim diagnostic.', $exception->getMessage());
+        }
+    }
+
     private function verifierFor(AssertionRequirements $requirements): AssertionVerifier
     {
         return new AssertionVerifier($this->keys, $this->clock, [
