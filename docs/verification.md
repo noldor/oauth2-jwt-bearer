@@ -1,6 +1,6 @@
 # Verification
 
-Verification targets the package and its illustrative application wrappers only. No serton-mail files, dependencies, database or running service are modified here. There is no remote or package publication.
+Verification targets the package and its illustrative application wrappers only. No serton-mail files, dependencies, database or running service are modified here. The publication workflow is documented in [releases](releases.md).
 
 ## Runtime and locked compatibility
 
@@ -50,10 +50,10 @@ The final `composer check` passed **137 tests / 559 assertions**, random seed `1
 
 Dependency lock and scanner/tool configuration are unchanged. Earlier same-day locked advisory checks and five native Betterleaks controls remain applicable. Current/index bytes and committed history are scanned before handoff; Composer/Git distribution archives are checked against the exact public allowlist. Tests, fixtures, development tooling and lock are excluded from distribution.
 
-Remote CI has not run. The consumer's dependency graph, GraphQL, domain SQL/locking/rate rules, refusal audit and error mapping need their own acceptance checks. See [local installation](local-installation.md), [transaction example](transactions.md) and [structured rejections](rejections.md).
+The local results above precede publication; release-specific remote Actions results are available in the repository. The consumer's dependency graph, GraphQL, domain SQL/locking/rate rules, refusal audit and error mapping need their own acceptance checks. See [local installation](local-installation.md), [transaction example](transactions.md) and [structured rejections](rejections.md).
 
 ## Independent review and local handoff
 
 Separate Requirements, Code quality, Security Guidance and Standards compliance reviews have no open findings. The Code quality review's exact-byte trimming defect was reproduced, fixed and rechecked by the affected reviewers. No new shared-rule or automated-check proposal is needed for this correction.
 
-Current/index Betterleaks scanning is clean. Composer and staged Git archives match the exact public-file allowlist. Final prose changes receive the same byte scan/archive checks; committed history is scanned before handoff. The package remains unpublished. Consumers must remove the former resolver constructor argument/binding, use direct application user rules and choose raw or prepared issuance according to subject identity.
+Current/index Betterleaks scanning is clean. Composer and staged Git archives match the exact public-file allowlist. Final prose changes receive the same byte scan/archive checks; committed history is scanned before handoff. Only the release workflow publishes version tags after its quality job succeeds. Consumers must remove the former resolver constructor argument/binding, use direct application user rules and choose raw or prepared issuance according to subject identity.

@@ -6,13 +6,13 @@ The package verifies an assertion and delegates access-token creation, persisten
 
 ## Installation
 
-After publishing the package to your Composer repository:
+Install the tagged package from [Packagist](https://packagist.org/packages/noldors/oauth2-jwt-bearer):
 
 ```sh
-composer require noldors/oauth2-jwt-bearer
+composer require noldors/oauth2-jwt-bearer:^0.1
 ```
 
-For local development, follow [local path installation](docs/local-installation.md). This checkout is a new package; publishing and connecting it to serton-mail are separate steps.
+For local development, follow [local path installation](docs/local-installation.md). Releases run the complete [Actions gate](docs/releases.md) before publishing a tag. Connecting the package to serton-mail remains application-owned.
 
 Runtime requirements include OpenSSL, sodium and mbstring. The committed development lock tests **PHP 8.5.12, Laravel 13, Passport 13.10.0 and League 9.4.1**. Passport is a development dependency and an optional integration, not a runtime dependency of the core. See [verification](docs/verification.md).
 

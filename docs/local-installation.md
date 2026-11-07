@@ -1,12 +1,12 @@
 # Local Composer installation and consumer handoff
 
-The package is intentionally **not published**. The source checkout is:
+Prefer the tagged [Packagist package](https://packagist.org/packages/noldors/oauth2-jwt-bearer) for normal installation (`composer require noldors/oauth2-jwt-bearer:^0.1`). Use a local path repository only when testing unpublished changes. The source checkout is:
 
 ```text
 /home/noldor/work/packages/oauth2-jwt-bearer
 ```
 
-The local development branch is `feature/jwt-bearer-grant`. A Composer path repository can use the corresponding development constraint without relaxing global stability:
+Composer infers a path package version from the checked-out source branch. The example below assumes `master`: switch the source checkout to `master` before resolving it. For another branch, use its matching `dev-<branch>` constraint. This does not require relaxing global stability:
 
 ```json
 {
@@ -18,7 +18,7 @@ The local development branch is `feature/jwt-bearer-grant`. A Composer path repo
         }
     ],
     "require": {
-        "noldors/oauth2-jwt-bearer": "dev-feature/jwt-bearer-grant"
+        "noldors/oauth2-jwt-bearer": "dev-master"
     }
 }
 ```
@@ -30,7 +30,7 @@ For reproducible installation without a development symlink, choose the path rep
 ## Integration checklist for serton-mail
 
 1. Read the application's own standards and accepted SM-9/CR-027 contract. This package does not authorize changing that contract, production settings or deployment.
-2. Install from the local path and confirm compatibility against the application's actual PHP 8.5, Laravel 13, Passport 13.10 and League 9.4.1 graph. Package verification covers its own locked graph; the consumer's dependency graph still needs validation.
+2. Install the tagged Packagist package (use a local path only for unpublished changes) and confirm compatibility against the application's actual PHP 8.5, Laravel 13, Passport 13.10 and League 9.4.1 graph. Package verification covers its own locked graph; the consumer's dependency graph still needs validation.
 3. Configure trusted CRM issuer/audience, actual client ID, `Algorithm::ED25519`, `AssertionRequirements(60, 3, ['iat'])` and explicit authentication policy. `OPTIONAL` permits assertion-only input; supplied credentials remain validated.
 4. Implement `KeyResolver` with trusted issuer/`kid` bindings and raw 32-byte public keys. Decode configured base64/hex first. Configure key rotation; legacy `EdDSA` is separate opt-in.
 5. Bind only the verifier for CRM. Do not bind a raw grant to the shared server: CRM `sub` is an external ID.
